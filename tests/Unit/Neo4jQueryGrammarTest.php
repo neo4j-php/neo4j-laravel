@@ -333,6 +333,62 @@ final class Neo4jQueryGrammarTest extends TestCase
         );
     }
 
+    public function testCompilesInnerJoinAsCartesianMatchWithWhere(): void
+    {
+        $builder = $this->builder()
+            ->from('Role')
+            ->join('RoleUser', 'Role.id', '=', 'RoleUser.role_id')
+            ->where('RoleUser.user_id', 'user-1')
+            ->select([
+                'Role.*',
+                'RoleUser.user_id as pivot_user_id',
+                'RoleUser.role_id as pivot_role_id',
+            ]);
+
+        self::assertSame(
+            'MATCH (n:Role), (RoleUser:RoleUser) WHERE (n.id = RoleUser.role_id AND (RoleUser.user_id = $p0)) '
+                .'RETURN n, RoleUser.user_id AS pivot_user_id, RoleUser.role_id AS pivot_role_id',
+            $builder->toSql()
+        );
+        self::assertSame(['user-1'], $builder->getBindings());
+    }
+
+    public function testCompilesJoinAggregatesAndExists(): void
+    {
+        $count = $this->builder()
+            ->from('Role')
+            ->join('RoleUser', 'Role.id', '=', 'RoleUser.role_id')
+            ->where('RoleUser.user_id', 'user-1');
+        $count->aggregate = ['function' => 'count', 'columns' => ['*']];
+
+        self::assertSame(
+            'MATCH (n:Role), (RoleUser:RoleUser) WHERE (n.id = RoleUser.role_id AND (RoleUser.user_id = $p0)) '
+                .'RETURN count(n) AS aggregate',
+            $count->toSql()
+        );
+
+        $exists = $this->builder()
+            ->from('Role')
+            ->join('RoleUser', 'Role.id', '=', 'RoleUser.role_id')
+            ->where('RoleUser.user_id', 'user-1');
+
+        self::assertSame(
+            'MATCH (n:Role), (RoleUser:RoleUser) WHERE (n.id = RoleUser.role_id AND (RoleUser.user_id = $p0)) '
+                .'RETURN true AS exists LIMIT 1',
+            (new Neo4jQueryGrammar())->compileExists($exists)
+        );
+    }
+
+    public function testRejectsUnsupportedJoinTypes(): void
+    {
+        $this->expectException(\RuntimeException::class);
+
+        $this->builder()
+            ->from('Role')
+            ->leftJoin('RoleUser', 'Role.id', '=', 'RoleUser.role_id')
+            ->toSql();
+    }
+
     public function testCompilesUnionQueries(): void
     {
         $first = $this->builder()->from('User')->where('role', 'admin')->select('name');

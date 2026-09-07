@@ -13,6 +13,9 @@ use Illuminate\Support\Str;
  *
  * Laravel's SoftDeletes trait works with Neo4j models: soft delete sets
  * `deleted_at`, and force delete removes the node (DETACH DELETE).
+ *
+ * Many-to-many uses stock Eloquent BelongsToMany against a pivot label
+ * (e.g. RoleUser). Joins compile to multi-node MATCH + equality WHERE.
  */
 trait HasNeo4jConnection
 {

@@ -190,9 +190,90 @@ Laravel's `SoftDeletes` trait works on Neo4j models (`deleted_at` property,
 Pagination APIs (`paginate`, `simplePaginate`, `cursorPaginate`) work via
 Cypher `SKIP` / `LIMIT` and aggregates for totals.
 
+Foreign-key relations work with stock Eloquent APIs against node properties
+(for example `Profile.user_id` / `Post.user_id` pointing at `User.id`):
+
+- one-to-one: `hasOne` / `belongsTo`
+- one-to-many: `hasMany` / `belongsTo`
+- many-to-many: stock `belongsToMany` via a pivot **label** (node), e.g. `RoleUser`
+  with `user_id` and `role_id` (Eloquent joins compile to multi-node MATCH + WHERE)
+
+Including lazy load, `with(...)` eager load, `$user->profile()->create([...])`,
+`$user->posts()->create([...])`, and `$user->roles()->attach([...])` / `detach`.
+Graph relationship types (`(a)-[:REL]->(b)`) and `whereHas` are not part of this
+surface yet.
+
 For a dedicated graph model, the package also provides
 `Neo4j\Neo4jLaravel\Neo4jModel`, which already includes the concern.
-Graph relationship APIs are not part of the initial Eloquent integration.
+
+```php
+use Neo4j\Neo4jLaravel\Neo4jModel;
+use Illuminate\Database\Eloquent\Relations\HasOne;
+use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\BelongsToMany;
+
+class User extends Neo4jModel
+{
+    protected $guarded = [];
+
+    public function profile(): HasOne
+    {
+        return $this->hasOne(Profile::class, 'user_id', 'id');
+    }
+
+    public function posts(): HasMany
+    {
+        return $this->hasMany(Post::class, 'user_id', 'id');
+    }
+
+    public function roles(): BelongsToMany
+    {
+        return $this->belongsToMany(Role::class, 'RoleUser', 'user_id', 'role_id');
+    }
+}
+
+class Profile extends Neo4jModel
+{
+    protected $guarded = [];
+
+    public function user(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'user_id', 'id');
+    }
+}
+
+class Post extends Neo4jModel
+{
+    protected $guarded = [];
+
+    public function user(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'user_id', 'id');
+    }
+}
+
+class Role extends Neo4jModel
+{
+    protected $guarded = [];
+
+    public function users(): BelongsToMany
+    {
+        return $this->belongsToMany(User::class, 'RoleUser', 'role_id', 'user_id');
+    }
+}
+
+$user = User::create(['name' => 'Ada']);
+$user->profile()->create(['bio' => 'Engineer']);
+$user->posts()->create(['title' => 'First']);
+
+$admin = Role::create(['name' => 'admin']);
+$user->roles()->attach($admin->id);
+
+$user = User::with(['profile', 'posts', 'roles'])->where('name', 'Ada')->first();
+$user->profile->bio; // Engineer
+$user->roles->pluck('name'); // ['admin']
+```
 
 ### Using Neo4j Client Interface
 

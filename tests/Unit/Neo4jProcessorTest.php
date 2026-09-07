@@ -84,4 +84,33 @@ final class Neo4jProcessorTest extends TestCase
             ['id' => 'doc-1', 'title' => 'Graph databases', 'elementId' => '4:abc:1', 'score' => 0.92],
         ], $results);
     }
+
+    public function testKeepsPivotAliasesAlongsideRelatedNodeProperties(): void
+    {
+        $node = new Node(
+            1,
+            new CypherList(['Role']),
+            new CypherMap(['id' => 'role-1', 'name' => 'admin']),
+            '4:abc:2'
+        );
+
+        $results = (new Neo4jProcessor())->processSelect(
+            $this->createMock(Builder::class),
+            [(object) [
+                'n' => $node,
+                'pivot_user_id' => 'user-1',
+                'pivot_role_id' => 'role-1',
+            ]]
+        );
+
+        self::assertSame([
+            [
+                'id' => 'role-1',
+                'name' => 'admin',
+                'elementId' => '4:abc:2',
+                'pivot_user_id' => 'user-1',
+                'pivot_role_id' => 'role-1',
+            ],
+        ], $results);
+    }
 }

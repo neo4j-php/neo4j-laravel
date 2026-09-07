@@ -18,12 +18,14 @@ use WikibaseSolutions\CypherDSL\Types\PropertyTypes\BooleanType;
  *
  * Supported today (select path):
  *   - from() / table() -> MATCH (n:Label)
- *   - select(columns)  -> RETURN n.col, ...
+ *   - join()           -> MATCH (n:Label), (join:JoinLabel) + equality WHERE
+ *                        (cartesian-product style; inner/cross only)
+ *   - select(columns)  -> RETURN n.col, ... (including `as` aliases / table.*)
  *   - where (Basic, Null, NotNull, In, NotIn, Between/NotBetween, Nested,
  *            Column, raw, Date, Time, Day, Month, Year)
  *   - whereVectorSimilarTo -> CALL db.index.vector.queryNodes
  *   - aggregates, exists()
- *   - groupBy / having (basic)
+ *   - groupBy / having (basic; not combined with joins yet)
  *   - orderBy -> ORDER BY
  *   - limit   -> LIMIT
  *   - offset  -> SKIP
@@ -149,23 +151,31 @@ final class Neo4jQueryGrammar extends Grammar
 
     private function compileMatchSelect(Builder $query): string
     {
-        $node = $this->compileNode($query->from);
-        $prefix = Query::new()->match($node)->build();
-        $where = $this->compileWhereExpression($query->wheres ?? [], $node);
+        if (! empty($query->joins) && $this->hasVectorSimilarity($query)) {
+            throw new RuntimeException('Joins cannot be combined with whereVectorSimilarTo().');
+        }
+
+        $variables = $this->compileVariableMap($query);
+        $prefix = $this->compileMatchPrefix($query);
+        $where = $this->compileWhereExpression($this->mergeJoinWheres($query), $variables);
 
         if ($where !== null) {
             $prefix .= ' '.Query::new()->where($where)->build();
         }
 
         if ($query->aggregate !== null) {
-            return $this->compileAggregateSelect($query, $prefix, $node);
+            return $this->compileAggregateSelect($query, $prefix, $variables);
         }
 
         if (! empty($query->groups) || ! empty($query->havings)) {
-            return $this->compileGroupedSelect($query, $prefix, $node);
+            if (! empty($query->joins)) {
+                throw new RuntimeException('groupBy/having with joins is not supported on Neo4j Query Builder yet.');
+            }
+
+            return $this->compileGroupedSelect($query, $prefix, $variables);
         }
 
-        $cypher = $prefix.' RETURN '.$this->compileReturnClause($query, $node);
+        $cypher = $prefix.' RETURN '.$this->compileReturnClause($query, $variables);
 
         $orders = $this->compileOrders($query, $query->orders ?? []);
         if ($orders !== '') {
@@ -184,19 +194,134 @@ final class Neo4jQueryGrammar extends Grammar
     }
 
     /**
-     * @param  array{function: string, columns: array<int, mixed>}  $aggregate
+     * Map table / alias names to Cypher variables.
+     *
+     * The primary from() label is always bound to "n". Joined labels use their
+     * table name (or explicit alias) as the variable, enabling cartesian joins:
+     * MATCH (n:Role), (RoleUser:RoleUser) WHERE n.id = RoleUser.role_id
+     *
+     * @return array<string, string>
      */
-    private function compileAggregateSelect(Builder $query, string $prefix, Node $node): string
+    private function compileVariableMap(Builder $query): array
+    {
+        $from = $this->parseTableName($query->from);
+        $map = [$from['name'] => 'n'];
+
+        if ($from['alias'] !== null) {
+            $map[$from['alias']] = 'n';
+        }
+
+        foreach ($query->joins ?? [] as $join) {
+            $type = strtolower((string) $join->type);
+            if (! in_array($type, ['inner', 'cross'], true)) {
+                throw new RuntimeException("Unsupported join type for Neo4j Query Builder: {$join->type}");
+            }
+
+            if (! is_string($join->table)) {
+                throw new RuntimeException('Subquery and expression joins are not supported on Neo4j Query Builder.');
+            }
+
+            $table = $this->parseTableName($join->table);
+            $variable = $table['alias'] ?? $table['name'];
+            $this->assertIdentifier($variable);
+            $map[$table['name']] = $variable;
+
+            if ($table['alias'] !== null) {
+                $map[$table['alias']] = $variable;
+            }
+        }
+
+        return $map;
+    }
+
+    /**
+     * @return array{name: string, alias: string|null}
+     */
+    private function parseTableName(mixed $table): array
+    {
+        if (! is_string($table) || $table === '') {
+            throw new InvalidArgumentException('Neo4j Query Builder requires a node label via from()/table().');
+        }
+
+        if (preg_match('/^(.+?)\s+as\s+(.+)$/i', $table, $matches) === 1) {
+            $name = trim($matches[1]);
+            $alias = trim($matches[2]);
+            $this->assertLabel($name);
+            $this->assertIdentifier($alias);
+
+            return ['name' => $name, 'alias' => $alias];
+        }
+
+        $this->assertLabel($table);
+
+        return ['name' => $table, 'alias' => null];
+    }
+
+    private function compileMatchPrefix(Builder $query): string
+    {
+        $from = $this->parseTableName($query->from);
+        $patterns = ['(n:'.$from['name'].')'];
+        $seen = ['n' => true];
+
+        foreach ($query->joins ?? [] as $join) {
+            $table = $this->parseTableName($join->table);
+            $variable = $table['alias'] ?? $table['name'];
+
+            if (isset($seen[$variable])) {
+                continue;
+            }
+
+            $seen[$variable] = true;
+            $patterns[] = "({$variable}:{$table['name']})";
+        }
+
+        return 'MATCH '.implode(', ', $patterns);
+    }
+
+    /**
+     * Join ON conditions are column equalities; fold them into MATCH WHERE.
+     *
+     * @return list<array<string, mixed>>
+     */
+    private function mergeJoinWheres(Builder $query): array
+    {
+        $wheres = [];
+
+        foreach ($query->joins ?? [] as $join) {
+            foreach ($join->wheres ?? [] as $where) {
+                $wheres[] = $where;
+            }
+        }
+
+        foreach ($query->wheres ?? [] as $where) {
+            $wheres[] = $where;
+        }
+
+        return $wheres;
+    }
+
+    private function assertLabel(string $label): void
+    {
+        if (! preg_match('/^[A-Za-z_][A-Za-z0-9_]*(?::[A-Za-z_][A-Za-z0-9_]*)*$/', $label)) {
+            throw new InvalidArgumentException("Invalid Neo4j label: {$label}");
+        }
+    }
+
+    /**
+     * @param  array{function: string, columns: array<int, mixed>}  $aggregate
+     * @param  array<string, string>  $variables
+     */
+    private function compileAggregateSelect(Builder $query, string $prefix, array $variables): string
     {
         $aggregate = $query->aggregate;
         $function = strtolower((string) $aggregate['function']);
         $this->assertIdentifier($function);
 
-        $argument = $this->compileAggregateArgument($function, $aggregate['columns'], (bool) $query->distinct);
+        $argument = $this->compileAggregateArgument($function, $aggregate['columns'], (bool) $query->distinct, $variables);
         $aggregateReturn = "{$function}({$argument}) AS aggregate";
 
         if (! empty($query->groups) || ! empty($query->havings)) {
-            $withParts = $this->compileGroupExpressions($query, $node);
+            $withParts = $this->compileGroupExpressions($query, $variables);
             $withParts[] = $aggregateReturn;
             $cypher = $prefix.' WITH '.implode(', ', $withParts);
 
@@ -218,8 +343,9 @@ final class Neo4jQueryGrammar extends Grammar
 
     /**
      * @param  array<int, mixed>  $columns
+     * @param  array<string, string>  $variables
      */
-    private function compileAggregateArgument(string $function, array $columns, bool $distinct): string
+    private function compileAggregateArgument(string $function, array $columns, bool $distinct, array $variables = []): string
     {
         $column = $columns[0] ?? '*';
 
@@ -231,7 +357,7 @@ final class Neo4jQueryGrammar extends Grammar
             }
             $argument = 'n';
         } else {
-            $argument = $this->compileColumn((string) $column)->toQuery();
+            $argument = $this->compileColumn((string) $column, $variables)->toQuery();
         }
 
         if ($distinct && $argument !== 'n') {
@@ -241,9 +367,12 @@ final class Neo4jQueryGrammar extends Grammar
         return $argument;
     }
 
-    private function compileGroupedSelect(Builder $query, string $prefix, Node $node): string
+    /**
+     * @param  array<string, string>  $variables
+     */
+    private function compileGroupedSelect(Builder $query, string $prefix, array $variables): string
     {
-        $withParts = $this->compileGroupExpressions($query, $node);
+        $withParts = $this->compileGroupExpressions($query, $variables);
 
         foreach ($query->columns ?? [] as $column) {
             if (! is_string($column) || $column === '*') {
@@ -260,7 +389,7 @@ final class Neo4jQueryGrammar extends Grammar
             }
 
             if (! $alreadyGrouped) {
-                $withParts[] = $this->compileColumn($column, $node)->toQuery().' AS '.$alias;
+                $withParts[] = $this->compileColumn($column, $variables)->toQuery().' AS '.$alias;
             }
         }
 
@@ -313,9 +442,10 @@ final class Neo4jQueryGrammar extends Grammar
     }
 
     /**
+     * @param  array<string, string>  $variables
      * @return list<string>
      */
-    private function compileGroupExpressions(Builder $query, Node $node): array
+    private function compileGroupExpressions(Builder $query, array $variables): array
     {
         $parts = [];
 
@@ -326,7 +456,7 @@ final class Neo4jQueryGrammar extends Grammar
                 continue;
             }
 
-            $property = $this->compileColumn((string) $group, $node)->toQuery();
+            $property = $this->compileColumn((string) $group, $variables)->toQuery();
             $parts[] = $property.' AS '.$this->propertyName((string) $group);
         }
 
@@ -424,7 +554,10 @@ final class Neo4jQueryGrammar extends Grammar
         return $name;
     }
 
-    private function compileReturnClause(Builder $query, Node $node): string
+    /**
+     * @param  array<string, string>  $variables
+     */
+    private function compileReturnClause(Builder $query, array $variables): string
     {
         $columns = $query->columns ?? null;
         $distinct = $query->distinct ? 'DISTINCT ' : '';
@@ -441,13 +574,44 @@ final class Neo4jQueryGrammar extends Grammar
                 continue;
             }
 
-            if (! is_string($column) || $column === '*') {
+            if (! is_string($column)) {
                 return $distinct.'n';
             }
-            $parts[] = $this->compileColumn($column, $node)->toQuery();
+
+            if ($column === '*') {
+                $parts[] = 'n';
+
+                continue;
+            }
+
+            $parts[] = $this->compileReturnColumn($column, $variables);
         }
 
         return $distinct.implode(', ', $parts);
+    }
+
+    /**
+     * @param  array<string, string>  $variables
+     */
+    private function compileReturnColumn(string $column, array $variables): string
+    {
+        $alias = null;
+
+        if (preg_match('/^(.+?)\s+as\s+(.+)$/i', $column, $matches) === 1) {
+            $column = trim($matches[1]);
+            $alias = trim($matches[2]);
+            $this->assertIdentifier($alias);
+        }
+
+        if ($column === '*') {
+            $expression = 'n';
+        } elseif (preg_match('/^([A-Za-z_][A-Za-z0-9_]*)\.\*$/', $column, $matches) === 1) {
+            $expression = $variables[$matches[1]] ?? 'n';
+        } else {
+            $expression = $this->compileColumn($column, $variables)->toQuery();
+        }
+
+        return $alias === null ? $expression : "{$expression} AS {$alias}";
     }
 
     /**
@@ -460,6 +624,7 @@ final class Neo4jQueryGrammar extends Grammar
             return '';
         }
 
+        $variables = $this->compileVariableMap($query);
         $parts = [];
         foreach ($orders as $order) {
             if ($this->isExpression($order['column'] ?? null)) {
@@ -469,7 +634,7 @@ final class Neo4jQueryGrammar extends Grammar
                 // After WITH aliases (groupBy), order by the alias when present.
                 $column = ! empty($query->groups) && ! str_contains($columnName, '.')
                     ? $this->propertyName($columnName)
-                    : $this->compileColumn($columnName)->toQuery();
+                    : $this->compileColumn($columnName, $variables)->toQuery();
             }
             $direction = strtolower((string) ($order['direction'] ?? 'asc')) === 'desc' ? 'DESC' : 'ASC';
             $parts[] = "{$column} {$direction}";
@@ -483,11 +648,13 @@ final class Neo4jQueryGrammar extends Grammar
     {
         $this->parameterIndex = 0;
 
-        if (empty($query->wheres)) {
+        $wheres = $this->mergeJoinWheres($query);
+
+        if ($wheres === []) {
             return '';
         }
 
-        $expression = $this->compileWhereExpression($query->wheres, $this->compileNode($query->from));
+        $expression = $this->compileWhereExpression($wheres, $this->compileVariableMap($query));
 
         return $expression === null ? '' : Query::new()->where($expression)->build();
     }
@@ -501,9 +668,9 @@ final class Neo4jQueryGrammar extends Grammar
             throw new RuntimeException('exists() is not supported with whereVectorSimilarTo().');
         }
 
-        $node = $this->compileNode($query->from);
-        $cypher = Query::new()->match($node)->build();
-        $where = $this->compileWhereExpression($query->wheres ?? [], $node);
+        $variables = $this->compileVariableMap($query);
+        $cypher = $this->compileMatchPrefix($query);
+        $where = $this->compileWhereExpression($this->mergeJoinWheres($query), $variables);
 
         if ($where !== null) {
             $cypher .= ' '.Query::new()->where($where)->build();
@@ -514,13 +681,14 @@ final class Neo4jQueryGrammar extends Grammar
 
     /**
      * @param  array<int, array<string, mixed>>  $wheres
+     * @param  array<string, string>  $variables
      */
-    private function compileWhereExpression(array $wheres, Node $node): ?BooleanType
+    private function compileWhereExpression(array $wheres, array $variables): ?BooleanType
     {
         $expression = null;
 
         foreach ($wheres as $where) {
-            $clause = $this->compileWhereClause($where, $node);
+            $clause = $this->compileWhereClause($where, $variables);
 
             if ($expression === null) {
                 $expression = $clause;
@@ -538,26 +706,27 @@ final class Neo4jQueryGrammar extends Grammar
 
     /**
      * @param  array<string, mixed>  $where
+     * @param  array<string, string>  $variables
      */
-    private function compileWhereClause(array $where, Node $node): BooleanType
+    private function compileWhereClause(array $where, array $variables): BooleanType
     {
         $type = $where['type'] ?? null;
 
         return match ($type) {
-            'Basic' => $this->compileBasicWhere($where, $node),
-            'Null' => $this->compileColumn((string) $where['column'], $node)->isNull(),
-            'NotNull' => $this->compileColumn((string) $where['column'], $node)->isNotNull(),
-            'In' => $this->compileInWhere($where, $node, false),
-            'NotIn' => $this->compileInWhere($where, $node, true),
-            'between' => $this->compileBetweenWhere($where, $node),
-            'Nested' => $this->compileNestedWhere($where, $node),
-            'Column' => $this->compileColumnWhere($where, $node),
+            'Basic' => $this->compileBasicWhere($where, $variables),
+            'Null' => $this->compileColumn((string) $where['column'], $variables)->isNull(),
+            'NotNull' => $this->compileColumn((string) $where['column'], $variables)->isNotNull(),
+            'In' => $this->compileInWhere($where, $variables, false),
+            'NotIn' => $this->compileInWhere($where, $variables, true),
+            'between' => $this->compileBetweenWhere($where, $variables),
+            'Nested' => $this->compileNestedWhere($where, $variables),
+            'Column' => $this->compileColumnWhere($where, $variables),
             'raw', 'Raw' => $this->compileRawWhere($where),
-            'Date' => $this->compileDateWhere($where, $node, 'date'),
-            'Time' => $this->compileDateWhere($where, $node, 'time'),
-            'Day' => $this->compileDatePartWhere($where, $node, 'day'),
-            'Month' => $this->compileDatePartWhere($where, $node, 'month'),
-            'Year' => $this->compileDatePartWhere($where, $node, 'year'),
+            'Date' => $this->compileDateWhere($where, $variables, 'date'),
+            'Time' => $this->compileDateWhere($where, $variables, 'time'),
+            'Day' => $this->compileDatePartWhere($where, $variables, 'day'),
+            'Month' => $this->compileDatePartWhere($where, $variables, 'month'),
+            'Year' => $this->compileDatePartWhere($where, $variables, 'year'),
             'VectorSimilar' => throw new RuntimeException('whereVectorSimilarTo() cannot be nested inside MATCH WHERE; it replaces the scan with a vector index query.'),
             default => throw new RuntimeException("Unsupported where type for Neo4j Query Builder: {$type}"),
         };
@@ -565,10 +734,11 @@ final class Neo4jQueryGrammar extends Grammar
 
     /**
      * @param  array<string, mixed>  $where
+     * @param  array<string, string>  $variables
      */
-    private function compileBasicWhere(array $where, Node $node): BooleanType
+    private function compileBasicWhere(array $where, array $variables): BooleanType
     {
-        $column = $this->compileColumn((string) $where['column'], $node);
+        $column = $this->compileColumn((string) $where['column'], $variables);
         $operator = $this->normalizeOperator((string) $where['operator']);
         $param = $this->nextParameter();
 
@@ -588,11 +758,12 @@ final class Neo4jQueryGrammar extends Grammar
 
     /**
      * @param  array<string, mixed>  $where
+     * @param  array<string, string>  $variables
      */
-    private function compileColumnWhere(array $where, Node $node): BooleanType
+    private function compileColumnWhere(array $where, array $variables): BooleanType
     {
-        $first = $this->compileColumn((string) $where['first'], $node)->toQuery();
-        $second = $this->compileColumn((string) $where['second'], $node)->toQuery();
+        $first = $this->compileColumn((string) $where['first'], $variables)->toQuery();
+        $second = $this->compileColumn((string) $where['second'], $variables)->toQuery();
         $operator = $this->normalizeComparisonOperator((string) $where['operator']);
 
         return Query::rawExpression("{$first} {$operator} {$second}");
@@ -613,10 +784,11 @@ final class Neo4jQueryGrammar extends Grammar
 
     /**
      * @param  array<string, mixed>  $where
+     * @param  array<string, string>  $variables
      */
-    private function compileDateWhere(array $where, Node $node, string $function): BooleanType
+    private function compileDateWhere(array $where, array $variables, string $function): BooleanType
     {
-        $column = $this->compileColumn((string) $where['column'], $node)->toQuery();
+        $column = $this->compileColumn((string) $where['column'], $variables)->toQuery();
         $operator = $this->normalizeComparisonOperator((string) $where['operator']);
         $parameter = '$'.$this->nextParameterName();
         $temporal = $this->temporalExpression($column);
@@ -630,10 +802,11 @@ final class Neo4jQueryGrammar extends Grammar
 
     /**
      * @param  array<string, mixed>  $where
+     * @param  array<string, string>  $variables
      */
-    private function compileDatePartWhere(array $where, Node $node, string $part): BooleanType
+    private function compileDatePartWhere(array $where, array $variables, string $part): BooleanType
     {
-        $column = $this->compileColumn((string) $where['column'], $node)->toQuery();
+        $column = $this->compileColumn((string) $where['column'], $variables)->toQuery();
         $operator = $this->normalizeComparisonOperator((string) $where['operator']);
         $parameter = '$'.$this->nextParameterName();
         $temporal = $this->temporalExpression($column);
@@ -649,10 +822,11 @@ final class Neo4jQueryGrammar extends Grammar
 
     /**
      * @param  array<string, mixed>  $where
+     * @param  array<string, string>  $variables
      */
-    private function compileInWhere(array $where, Node $node, bool $negate): BooleanType
+    private function compileInWhere(array $where, array $variables, bool $negate): BooleanType
     {
-        $column = $this->compileColumn((string) $where['column'], $node);
+        $column = $this->compileColumn((string) $where['column'], $variables);
         $values = $where['values'] ?? [];
 
         $params = [];
@@ -671,10 +845,11 @@ final class Neo4jQueryGrammar extends Grammar
 
     /**
      * @param  array<string, mixed>  $where
+     * @param  array<string, string>  $variables
      */
-    private function compileBetweenWhere(array $where, Node $node): BooleanType
+    private function compileBetweenWhere(array $where, array $variables): BooleanType
     {
-        $column = $this->compileColumn((string) $where['column'], $node);
+        $column = $this->compileColumn((string) $where['column'], $variables);
         $low = $this->nextParameter();
         $high = $this->nextParameter();
 
@@ -685,15 +860,16 @@ final class Neo4jQueryGrammar extends Grammar
 
     /**
      * @param  array<string, mixed>  $where
+     * @param  array<string, string>  $variables
      */
-    private function compileNestedWhere(array $where, Node $node): BooleanType
+    private function compileNestedWhere(array $where, array $variables): BooleanType
     {
         $nested = $where['query'] ?? null;
         if (! $nested instanceof Builder) {
             throw new RuntimeException('Invalid nested where clause for Neo4j Query Builder.');
         }
 
-        $expression = $this->compileWhereExpression($nested->wheres ?? [], $node);
+        $expression = $this->compileWhereExpression($nested->wheres ?? [], $variables);
 
         if ($expression === null) {
             throw new RuntimeException('Nested where clause for Neo4j Query Builder cannot be empty.');
@@ -718,7 +894,7 @@ final class Neo4jQueryGrammar extends Grammar
 
     private function compileVectorSelect(Builder $query): string
     {
-        $node = $this->compileNode($query->from);
+        $variables = $this->compileVariableMap($query);
         $vectorWhere = null;
         $vectorParameter = null;
         $minSimilarityParameter = null;
@@ -737,7 +913,7 @@ final class Neo4jQueryGrammar extends Grammar
                 continue;
             }
 
-            $extraFilters[] = $this->compileWhereClause($where, $node)->toQuery();
+            $extraFilters[] = $this->compileWhereClause($where, $variables)->toQuery();
         }
 
         if ($vectorWhere === null || $vectorParameter === null || $minSimilarityParameter === null) {
@@ -869,20 +1045,17 @@ final class Neo4jQueryGrammar extends Grammar
 
     private function compileNode(mixed $from): Node
     {
-        if (! is_string($from) || $from === '') {
-            throw new InvalidArgumentException('Neo4j Query Builder requires a node label via from()/table().');
-        }
-
-        if (! preg_match('/^[A-Za-z_][A-Za-z0-9_]*(?::[A-Za-z_][A-Za-z0-9_]*)*$/', $from)) {
-            throw new InvalidArgumentException("Invalid Neo4j label: {$from}");
-        }
+        $table = $this->parseTableName($from);
 
         return Query::node()
-            ->withLabels(explode(':', $from))
+            ->withLabels(explode(':', $table['name']))
             ->withVariable('n');
     }
 
-    private function compileColumn(mixed $column, ?Node $node = null): Property
+    /**
+     * @param  array<string, string>  $variables
+     */
+    private function compileColumn(mixed $column, array $variables = []): Property
     {
         if (! is_string($column) || $column === '') {
             throw new InvalidArgumentException('Invalid column reference for Neo4j Query Builder.');
@@ -894,14 +1067,16 @@ final class Neo4jQueryGrammar extends Grammar
             $this->assertIdentifier($property);
 
             // Eloquent qualifies keys with the model table/label (for example,
-            // User.id), while this single-node grammar always binds that label
-            // to the Cypher variable "n".
-            return Query::variable('n')->property($property);
+            // User.id). The primary from() label is bound to "n"; joined labels
+            // keep their own Cypher variable from the variable map.
+            $variable = $variables[$alias] ?? 'n';
+
+            return Query::variable($variable)->property($property);
         }
 
         $this->assertIdentifier($column);
 
-        return ($node ?? Query::node()->withVariable('n'))->property($column);
+        return Query::variable('n')->property($column);
     }
 
     private function assertIdentifier(string $identifier): void
@@ -954,11 +1129,17 @@ final class Neo4jQueryGrammar extends Grammar
     public function compileUpdate(Builder $query, array $values)
     {
         $this->parameterIndex = 0;
+
+        if (! empty($query->joins)) {
+            throw new RuntimeException('Updates with joins are not supported on Neo4j Query Builder.');
+        }
+
+        $variables = $this->compileVariableMap($query);
         $node = $this->compileNode($query->from);
         $assignments = [];
 
         foreach ($values as $column => $value) {
-            $property = $this->compileColumn((string) $column, $node)->toQuery();
+            $property = $this->compileColumn((string) $column, $variables)->toQuery();
 
             if ($this->isExpression($value)) {
                 $assignments[] = $property.' = '.$this->getValue($value);
@@ -968,7 +1149,7 @@ final class Neo4jQueryGrammar extends Grammar
         }
 
         $cypher = Query::new()->match($node);
-        $where = $this->compileWhereExpression($query->wheres ?? [], $node);
+        $where = $this->compileWhereExpression($query->wheres ?? [], $variables);
         $prefix = $cypher->build();
 
         if ($where !== null) {
@@ -985,9 +1166,15 @@ final class Neo4jQueryGrammar extends Grammar
     public function compileDelete(Builder $query)
     {
         $this->parameterIndex = 0;
+
+        if (! empty($query->joins)) {
+            throw new RuntimeException('Deletes with joins are not supported on Neo4j Query Builder.');
+        }
+
+        $variables = $this->compileVariableMap($query);
         $node = $this->compileNode($query->from);
         $cypher = Query::new()->match($node);
-        $where = $this->compileWhereExpression($query->wheres ?? [], $node);
+        $where = $this->compileWhereExpression($query->wheres ?? [], $variables);
         $prefix = $cypher->build();
 
         if ($where !== null) {
@@ -1013,15 +1200,7 @@ final class Neo4jQueryGrammar extends Grammar
 
     private function compileLabel(mixed $from): string
     {
-        if (! is_string($from) || $from === '') {
-            throw new InvalidArgumentException('Neo4j Query Builder requires a node label via from()/table().');
-        }
-
-        if (! preg_match('/^[A-Za-z_][A-Za-z0-9_]*(?::[A-Za-z_][A-Za-z0-9_]*)*$/', $from)) {
-            throw new InvalidArgumentException("Invalid Neo4j label: {$from}");
-        }
-
-        return $from;
+        return $this->parseTableName($from)['name'];
     }
 
     private function nextParameterName(): string

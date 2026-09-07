@@ -2,7 +2,11 @@
 
 namespace Neo4j\Neo4jLaravel\Tests\Integration;
 
- use Illuminate\Database\Eloquent\SoftDeletes;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\BelongsToMany;
+use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasOne;
+use Illuminate\Database\Eloquent\SoftDeletes;
 use Illuminate\Pagination\CursorPaginator;
 use Illuminate\Pagination\LengthAwarePaginator;
 use Illuminate\Pagination\Paginator;
@@ -19,6 +23,14 @@ final class Neo4jEloquentTest extends TestCase
             ->statement('MATCH (n:User) DETACH DELETE n');
         $this->app->make('db')->connection('neo4j')
             ->statement('MATCH (n:SoftUser) DETACH DELETE n');
+        $this->app->make('db')->connection('neo4j')
+            ->statement('MATCH (n:Profile) DETACH DELETE n');
+        $this->app->make('db')->connection('neo4j')
+            ->statement('MATCH (n:Post) DETACH DELETE n');
+        $this->app->make('db')->connection('neo4j')
+            ->statement('MATCH (n:Role) DETACH DELETE n');
+        $this->app->make('db')->connection('neo4j')
+            ->statement('MATCH (n:RoleUser) DETACH DELETE n');
     }
 
     public function testEloquentModelSupportsBasicCrud(): void
@@ -161,15 +173,135 @@ final class Neo4jEloquentTest extends TestCase
         );
     }
 
+    public function testEloquentHasOneProfile(): void
+    {
+        $user = User::create(['name' => 'Ada']);
+        $profile = $user->profile()->create(['bio' => 'Engineer']);
 
+        self::assertInstanceOf(Profile::class, $profile);
+        self::assertSame($user->id, $profile->user_id);
 
+        self::assertInstanceOf(Profile::class, $user->fresh()->profile);
+        self::assertSame('Engineer', $user->fresh()->profile->bio);
+
+        $loaded = User::with('profile')->where('id', $user->id)->firstOrFail();
+
+        self::assertTrue($loaded->relationLoaded('profile'));
+        self::assertInstanceOf(Profile::class, $loaded->profile);
+        self::assertSame('Engineer', $loaded->profile->bio);
+        self::assertSame($user->id, $loaded->profile->user->id);
+    }
+
+    public function testEloquentHasManyPosts(): void
+    {
+        $user = User::create(['name' => 'Ada']);
+
+        $first = $user->posts()->create(['title' => 'First']);
+        $second = $user->posts()->create(['title' => 'Second']);
+
+        self::assertInstanceOf(Post::class, $first);
+        self::assertSame($user->id, $first->user_id);
+        self::assertSame($user->id, $second->user_id);
+
+        $posts = $user->fresh()->posts;
+        self::assertCount(2, $posts);
+        self::assertSame(['First', 'Second'], $posts->pluck('title')->sort()->values()->all());
+
+        $loaded = User::with('posts')->where('id', $user->id)->firstOrFail();
+
+        self::assertTrue($loaded->relationLoaded('posts'));
+        self::assertCount(2, $loaded->posts);
+        self::assertSame($user->id, $loaded->posts->first()->user->id);
+    }
+
+    public function testEloquentBelongsToManyRoles(): void
+    {
+        $user = User::create(['name' => 'Ada']);
+        $admin = Role::create(['name' => 'admin']);
+        $editor = Role::create(['name' => 'editor']);
+
+        $user->roles()->attach([$admin->id, $editor->id]);
+
+        $roles = $user->fresh()->roles;
+        self::assertCount(2, $roles);
+        self::assertSame(['admin', 'editor'], $roles->pluck('name')->sort()->values()->all());
+
+        $loaded = User::with('roles')->where('id', $user->id)->firstOrFail();
+
+        self::assertTrue($loaded->relationLoaded('roles'));
+        self::assertCount(2, $loaded->roles);
+        self::assertSame($user->id, $loaded->roles->first()->users->first()->id);
+
+        $user->roles()->detach($editor->id);
+        self::assertSame(['admin'], $user->fresh()->roles->pluck('name')->all());
+    }
+
+    public function testEloquentBelongsToManyRelationQueryConstraints(): void
+    {
+        $user = User::create(['name' => 'Ada']);
+        $other = User::create(['name' => 'Alan']);
+        $admin = Role::create(['name' => 'admin']);
+        $editor = Role::create(['name' => 'editor']);
+        $viewer = Role::create(['name' => 'viewer']);
+
+        $user->roles()->attach([$admin->id, $editor->id]);
+        $other->roles()->attach($viewer->id);
+
+        $filtered = $user->roles()->where('name', 'admin')->get();
+        self::assertCount(1, $filtered);
+        self::assertSame('admin', $filtered->first()->name);
+        self::assertSame($user->id, $filtered->first()->pivot->user_id);
+
+        self::assertSame(2, $user->roles()->count());
+        self::assertSame(1, $user->roles()->where('name', 'editor')->count());
+        self::assertTrue($user->roles()->where('name', 'admin')->exists());
+        self::assertFalse($user->roles()->where('name', 'viewer')->exists());
+
+        $ordered = $user->roles()->orderBy('name')->pluck('name')->all();
+        self::assertSame(['admin', 'editor'], $ordered);
+
+        $constrained = User::with(['roles' => static function ($query): void {
+            $query->where('name', 'admin')->orderBy('name');
+        }])->where('id', $user->id)->firstOrFail();
+
+        self::assertTrue($constrained->relationLoaded('roles'));
+        self::assertCount(1, $constrained->roles);
+        self::assertSame('admin', $constrained->roles->first()->name);
+        self::assertSame($user->id, $constrained->roles->first()->pivot->user_id);
+    }
 }
 
 final class User extends Neo4jModel
 {
     protected $guarded = [];
+
+    public function profile(): HasOne
+    {
+        return $this->hasOne(Profile::class, 'user_id', 'id');
+    }
+
+    public function posts(): HasMany
+    {
+        return $this->hasMany(Post::class, 'user_id', 'id');
+    }
+
+    public function roles(): BelongsToMany
+    {
+        return $this->belongsToMany(Role::class, 'RoleUser', 'user_id', 'role_id');
+    }
 }
 
+final class Profile extends Neo4jModel
+{
+    protected $table = 'Profile';
+
+    protected $guarded = [];
+
+    public function user(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'user_id', 'id');
+    }
+}
 
 final class SoftUser extends Neo4jModel
 {
@@ -179,3 +311,29 @@ final class SoftUser extends Neo4jModel
 
     protected $guarded = [];
 }
+
+
+final class Post extends Neo4jModel
+{
+    protected $table = 'Post';
+
+    protected $guarded = [];
+
+    public function user(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'user_id', 'id');
+    }
+}
+
+final class Role extends Neo4jModel
+{
+    protected $table = 'Role';
+
+    protected $guarded = [];
+
+    public function users(): BelongsToMany
+    {
+        return $this->belongsToMany(User::class, 'RoleUser', 'role_id', 'user_id');
+    }
+}
+
