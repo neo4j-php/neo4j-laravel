@@ -488,4 +488,3 @@ final class Owner extends Neo4jModel
 
     protected $guarded = [];
 }
-
