@@ -197,6 +197,8 @@ Foreign-key relations work with stock Eloquent APIs against node properties
 - one-to-many: `hasMany` / `belongsTo`
 - many-to-many: stock `belongsToMany` via a pivot **label** (node), e.g. `RoleUser`
   with `user_id` and `role_id` (Eloquent joins compile to multi-node MATCH + WHERE)
+- polymorphic: stock `morphOne` / `morphMany` / `morphTo` (type + id properties),
+  and stock `morphToMany` / `morphedByMany` via a pivot label (e.g. `Taggable`)
 
 Including lazy load, `with(...)` eager load, `$user->profile()->create([...])`,
 `$user->posts()->create([...])`, and `$user->roles()->attach([...])` / `detach`.
@@ -212,6 +214,10 @@ use Illuminate\Database\Eloquent\Relations\HasOne;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
+use Illuminate\Database\Eloquent\Relations\MorphOne;
+use Illuminate\Database\Eloquent\Relations\MorphMany;
+use Illuminate\Database\Eloquent\Relations\MorphTo;
+use Illuminate\Database\Eloquent\Relations\MorphToMany;
 
 class User extends Neo4jModel
 {
@@ -251,6 +257,21 @@ class Post extends Neo4jModel
     {
         return $this->belongsTo(User::class, 'user_id', 'id');
     }
+
+    public function image(): MorphOne
+    {
+        return $this->morphOne(Image::class, 'imageable');
+    }
+
+    public function comments(): MorphMany
+    {
+        return $this->morphMany(Comment::class, 'commentable');
+    }
+
+    public function tags(): MorphToMany
+    {
+        return $this->morphToMany(Tag::class, 'taggable', 'Taggable', 'taggable_id', 'tag_id');
+    }
 }
 
 class Role extends Neo4jModel
@@ -263,6 +284,36 @@ class Role extends Neo4jModel
     }
 }
 
+class Image extends Neo4jModel
+{
+    protected $guarded = [];
+
+    public function imageable(): MorphTo
+    {
+        return $this->morphTo();
+    }
+}
+
+class Comment extends Neo4jModel
+{
+    protected $guarded = [];
+
+    public function commentable(): MorphTo
+    {
+        return $this->morphTo();
+    }
+}
+
+class Tag extends Neo4jModel
+{
+    protected $guarded = [];
+
+    public function posts(): MorphToMany
+    {
+        return $this->morphedByMany(Post::class, 'taggable', 'Taggable', 'tag_id', 'taggable_id');
+    }
+}
+
 $user = User::create(['name' => 'Ada']);
 $user->profile()->create(['bio' => 'Engineer']);
 $user->posts()->create(['title' => 'First']);
@@ -270,9 +321,16 @@ $user->posts()->create(['title' => 'First']);
 $admin = Role::create(['name' => 'admin']);
 $user->roles()->attach($admin->id);
 
+$post = Post::where('title', 'First')->first();
+$post->image()->create(['url' => 'cover.png']);
+$post->comments()->create(['body' => 'Nice']);
+$post->tags()->attach(Tag::create(['name' => 'neo4j'])->id);
+
 $user = User::with(['profile', 'posts', 'roles'])->where('name', 'Ada')->first();
 $user->profile->bio; // Engineer
 $user->roles->pluck('name'); // ['admin']
+$post->image->url; // cover.png
+$post->tags->pluck('name'); // ['neo4j']
 ```
 
 ### Using Neo4j Client Interface
