@@ -127,7 +127,7 @@ class HtmlMovieController extends Controller
                 ->with('error', 'Movie not found');
         }
 
-        $movie = $this->presentMovieRow($result[0]->toArray());
+        $movie = $this->presentMovieRow($this->toArray($result[0]));
 
         return view('movies.show', compact('movie'));
     }
@@ -147,7 +147,7 @@ class HtmlMovieController extends Controller
 
         $movies = collect($result)
             ->map(function ($row) {
-                $data = $row->toArray();
+                $data = $this->toArray($row);
                 $movie = $this->presentNode($data['other'] ?? null);
 
                 return [
@@ -176,7 +176,7 @@ class HtmlMovieController extends Controller
             ['title' => $title]
         );
 
-        if ($result[0]->get('deleted') === 0) {
+        if ((int) ($result[0]->deleted ?? 0) === 0) {
             return redirect()
                 ->route('movies.index')
                 ->with('error', 'Movie not found');

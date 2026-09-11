@@ -65,8 +65,8 @@ final class Neo4jServiceProvider extends ServiceProvider
             return $factory->create();
         });
 
-        $this->app->singleton(ClientInterface::class, function (): ClientInterface {
-            $connection = DB::connection('neo4j');
+        $this->app->singleton(ClientInterface::class, function (Application $app): ClientInterface {
+            $connection = DB::connection($app->make('config')->get('database.default'));
             assert($connection instanceof Neo4jConnection);
 
             return $connection->getClient();

@@ -389,6 +389,25 @@ final class Neo4jQueryGrammarTest extends TestCase
             ->toSql();
     }
 
+    public function testCompilesHasManyThroughStyleJoinAndThroughKeyAlias(): void
+    {
+        $builder = $this->builder()
+            ->from('Post')
+            ->join('User', 'User.id', '=', 'Post.user_id')
+            ->where('User.country_id', 'country-1')
+            ->select([
+                'Post.*',
+                'User.country_id as laravel_through_key',
+            ]);
+
+        self::assertSame(
+            'MATCH (n:Post), (User:User) WHERE (User.id = n.user_id AND (User.country_id = $p0)) '
+                .'RETURN n, User.country_id AS laravel_through_key',
+            $builder->toSql()
+        );
+        self::assertSame(['country-1'], $builder->getBindings());
+    }
+
     public function testCompilesMorphToManyStyleJoinWithTypeConstraint(): void
     {
         $builder = $this->builder()
