@@ -6,6 +6,10 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\Relations\HasOne;
+use Illuminate\Database\Eloquent\Relations\MorphMany;
+use Illuminate\Database\Eloquent\Relations\MorphOne;
+use Illuminate\Database\Eloquent\Relations\MorphTo;
+use Illuminate\Database\Eloquent\Relations\MorphToMany;
 use Illuminate\Database\Eloquent\SoftDeletes;
 use Illuminate\Pagination\CursorPaginator;
 use Illuminate\Pagination\LengthAwarePaginator;
@@ -31,6 +35,16 @@ final class Neo4jEloquentTest extends TestCase
             ->statement('MATCH (n:Role) DETACH DELETE n');
         $this->app->make('db')->connection('neo4j')
             ->statement('MATCH (n:RoleUser) DETACH DELETE n');
+        $this->app->make('db')->connection('neo4j')
+            ->statement('MATCH (n:Video) DETACH DELETE n');
+        $this->app->make('db')->connection('neo4j')
+            ->statement('MATCH (n:Image) DETACH DELETE n');
+        $this->app->make('db')->connection('neo4j')
+            ->statement('MATCH (n:Comment) DETACH DELETE n');
+        $this->app->make('db')->connection('neo4j')
+            ->statement('MATCH (n:Tag) DETACH DELETE n');
+        $this->app->make('db')->connection('neo4j')
+            ->statement('MATCH (n:Taggable) DETACH DELETE n');
     }
 
     public function testEloquentModelSupportsBasicCrud(): void
@@ -269,6 +283,137 @@ final class Neo4jEloquentTest extends TestCase
         self::assertSame('admin', $constrained->roles->first()->name);
         self::assertSame($user->id, $constrained->roles->first()->pivot->user_id);
     }
+
+    public function testEloquentMorphOneImage(): void
+    {
+        $post = Post::create(['title' => 'Graphs', 'user_id' => User::create(['name' => 'Ada'])->id]);
+        $video = Video::create(['title' => 'Intro']);
+
+        $postImage = $post->image()->create(['url' => 'post.png']);
+        $video->image()->create(['url' => 'video.png']);
+
+        self::assertInstanceOf(Image::class, $postImage);
+        self::assertSame($post->id, $postImage->imageable_id);
+        self::assertSame($post->getMorphClass(), $postImage->imageable_type);
+
+        $loaded = $post->fresh()->image;
+        self::assertInstanceOf(Image::class, $loaded);
+        self::assertSame('post.png', $loaded->url);
+        self::assertInstanceOf(Post::class, $loaded->imageable);
+        self::assertSame($post->id, $loaded->imageable->id);
+
+        $eager = Post::with('image')->where('id', $post->id)->firstOrFail();
+        self::assertTrue($eager->relationLoaded('image'));
+        self::assertSame('post.png', $eager->image->url);
+    }
+
+    public function testEloquentMorphManyComments(): void
+    {
+        $post = Post::create(['title' => 'Graphs', 'user_id' => User::create(['name' => 'Ada'])->id]);
+        $video = Video::create(['title' => 'Intro']);
+
+        $post->comments()->create(['body' => 'Nice']);
+        $post->comments()->create(['body' => 'Thanks']);
+        $video->comments()->create(['body' => 'Watch later']);
+
+        $comments = $post->fresh()->comments;
+        self::assertCount(2, $comments);
+        self::assertSame(['Nice', 'Thanks'], $comments->pluck('body')->sort()->values()->all());
+        self::assertInstanceOf(Post::class, $comments->first()->commentable);
+
+        $eager = Post::with('comments')->where('id', $post->id)->firstOrFail();
+        self::assertTrue($eager->relationLoaded('comments'));
+        self::assertCount(2, $eager->comments);
+    }
+
+    public function testEloquentMorphManyRelationQueryConstraints(): void
+    {
+        $post = Post::create(['title' => 'Graphs', 'user_id' => User::create(['name' => 'Ada'])->id]);
+        $other = Post::create(['title' => 'Other', 'user_id' => User::create(['name' => 'Alan'])->id]);
+
+        $post->comments()->create(['body' => 'Alpha']);
+        $post->comments()->create(['body' => 'Beta']);
+        $other->comments()->create(['body' => 'Gamma']);
+
+        $filtered = $post->comments()->where('body', 'Alpha')->get();
+        self::assertCount(1, $filtered);
+        self::assertSame('Alpha', $filtered->first()->body);
+
+        self::assertSame(2, $post->comments()->count());
+        self::assertTrue($post->comments()->where('body', 'Beta')->exists());
+        self::assertFalse($post->comments()->where('body', 'Gamma')->exists());
+
+        $ordered = $post->comments()->orderBy('body')->pluck('body')->all();
+        self::assertSame(['Alpha', 'Beta'], $ordered);
+
+        $constrained = Post::with(['comments' => static function ($query): void {
+            $query->where('body', 'Alpha')->orderBy('body');
+        }])->where('id', $post->id)->firstOrFail();
+
+        self::assertTrue($constrained->relationLoaded('comments'));
+        self::assertCount(1, $constrained->comments);
+        self::assertSame('Alpha', $constrained->comments->first()->body);
+    }
+
+    public function testEloquentMorphToManyTags(): void
+    {
+        $post = Post::create(['title' => 'Graphs', 'user_id' => User::create(['name' => 'Ada'])->id]);
+        $video = Video::create(['title' => 'Intro']);
+        $neo4j = Tag::create(['name' => 'neo4j']);
+        $php = Tag::create(['name' => 'php']);
+        $laravel = Tag::create(['name' => 'laravel']);
+
+        $post->tags()->attach([$neo4j->id, $php->id]);
+        $video->tags()->attach($laravel->id);
+
+        $tags = $post->fresh()->tags;
+        self::assertCount(2, $tags);
+        self::assertSame(['neo4j', 'php'], $tags->pluck('name')->sort()->values()->all());
+        self::assertSame($post->id, $tags->first()->pivot->taggable_id);
+        self::assertSame($post->getMorphClass(), $tags->first()->pivot->taggable_type);
+
+        $loaded = Post::with('tags')->where('id', $post->id)->firstOrFail();
+        self::assertTrue($loaded->relationLoaded('tags'));
+        self::assertCount(2, $loaded->tags);
+        self::assertSame($post->id, $loaded->tags->first()->posts->first()->id);
+
+        $post->tags()->detach($php->id);
+        self::assertSame(['neo4j'], $post->fresh()->tags->pluck('name')->all());
+    }
+
+    public function testEloquentMorphToManyRelationQueryConstraints(): void
+    {
+        $post = Post::create(['title' => 'Graphs', 'user_id' => User::create(['name' => 'Ada'])->id]);
+        $other = Post::create(['title' => 'Other', 'user_id' => User::create(['name' => 'Alan'])->id]);
+        $neo4j = Tag::create(['name' => 'neo4j']);
+        $php = Tag::create(['name' => 'php']);
+        $laravel = Tag::create(['name' => 'laravel']);
+
+        $post->tags()->attach([$neo4j->id, $php->id]);
+        $other->tags()->attach($laravel->id);
+
+        $filtered = $post->tags()->where('name', 'neo4j')->get();
+        self::assertCount(1, $filtered);
+        self::assertSame('neo4j', $filtered->first()->name);
+        self::assertSame($post->id, $filtered->first()->pivot->taggable_id);
+
+        self::assertSame(2, $post->tags()->count());
+        self::assertSame(1, $post->tags()->where('name', 'php')->count());
+        self::assertTrue($post->tags()->where('name', 'neo4j')->exists());
+        self::assertFalse($post->tags()->where('name', 'laravel')->exists());
+
+        $ordered = $post->tags()->orderBy('name')->pluck('name')->all();
+        self::assertSame(['neo4j', 'php'], $ordered);
+
+        $constrained = Post::with(['tags' => static function ($query): void {
+            $query->where('name', 'neo4j')->orderBy('name');
+        }])->where('id', $post->id)->firstOrFail();
+
+        self::assertTrue($constrained->relationLoaded('tags'));
+        self::assertCount(1, $constrained->tags);
+        self::assertSame('neo4j', $constrained->tags->first()->name);
+        self::assertSame($post->id, $constrained->tags->first()->pivot->taggable_id);
+    }
 }
 
 final class User extends Neo4jModel
@@ -323,6 +468,21 @@ final class Post extends Neo4jModel
     {
         return $this->belongsTo(User::class, 'user_id', 'id');
     }
+
+    public function image(): MorphOne
+    {
+        return $this->morphOne(Image::class, 'imageable');
+    }
+
+    public function comments(): MorphMany
+    {
+        return $this->morphMany(Comment::class, 'commentable');
+    }
+
+    public function tags(): MorphToMany
+    {
+        return $this->morphToMany(Tag::class, 'taggable', 'Taggable', 'taggable_id', 'tag_id');
+    }
 }
 
 final class Role extends Neo4jModel
@@ -334,6 +494,64 @@ final class Role extends Neo4jModel
     public function users(): BelongsToMany
     {
         return $this->belongsToMany(User::class, 'RoleUser', 'role_id', 'user_id');
+    }
+}
+
+final class Video extends Neo4jModel
+{
+    protected $table = 'Video';
+
+    protected $guarded = [];
+
+    public function image(): MorphOne
+    {
+        return $this->morphOne(Image::class, 'imageable');
+    }
+
+    public function comments(): MorphMany
+    {
+        return $this->morphMany(Comment::class, 'commentable');
+    }
+
+    public function tags(): MorphToMany
+    {
+        return $this->morphToMany(Tag::class, 'taggable', 'Taggable', 'taggable_id', 'tag_id');
+    }
+}
+
+final class Image extends Neo4jModel
+{
+    protected $table = 'Image';
+
+    protected $guarded = [];
+
+    public function imageable(): MorphTo
+    {
+        return $this->morphTo();
+    }
+}
+
+final class Comment extends Neo4jModel
+{
+    protected $table = 'Comment';
+
+    protected $guarded = [];
+
+    public function commentable(): MorphTo
+    {
+        return $this->morphTo();
+    }
+}
+
+final class Tag extends Neo4jModel
+{
+    protected $table = 'Tag';
+
+    protected $guarded = [];
+
+    public function posts(): MorphToMany
+    {
+        return $this->morphedByMany(Post::class, 'taggable', 'Taggable', 'tag_id', 'taggable_id');
     }
 }
 

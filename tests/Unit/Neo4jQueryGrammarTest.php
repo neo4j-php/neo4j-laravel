@@ -389,6 +389,30 @@ final class Neo4jQueryGrammarTest extends TestCase
             ->toSql();
     }
 
+    public function testCompilesMorphToManyStyleJoinWithTypeConstraint(): void
+    {
+        $builder = $this->builder()
+            ->from('Tag')
+            ->join('Taggable', 'Tag.id', '=', 'Taggable.tag_id')
+            ->where('Taggable.taggable_id', 'post-1')
+            ->where('Taggable.taggable_type', 'Post')
+            ->select([
+                'Tag.*',
+                'Taggable.taggable_id as pivot_taggable_id',
+                'Taggable.tag_id as pivot_tag_id',
+                'Taggable.taggable_type as pivot_taggable_type',
+            ]);
+
+        self::assertSame(
+            'MATCH (n:Tag), (Taggable:Taggable) WHERE ((n.id = Taggable.tag_id AND (Taggable.taggable_id = $p0)) '
+                .'AND (Taggable.taggable_type = $p1)) '
+                .'RETURN n, Taggable.taggable_id AS pivot_taggable_id, Taggable.tag_id AS pivot_tag_id, '
+                .'Taggable.taggable_type AS pivot_taggable_type',
+            $builder->toSql()
+        );
+        self::assertSame(['post-1', 'Post'], $builder->getBindings());
+    }
+
     public function testCompilesUnionQueries(): void
     {
         $first = $this->builder()->from('User')->where('role', 'admin')->select('name');
