@@ -59,7 +59,8 @@ return [
 
     'storage' => [
         'database' => [
-            'connection' => env('DB_CONNECTION', 'mysql'),
+            // Telescope needs a SQL connection; do not reuse DB_CONNECTION (neo4j).
+            'connection' => env('TELESCOPE_DB_CONNECTION', 'sqlite'),
             'chunk' => 1000,
         ],
     ],
