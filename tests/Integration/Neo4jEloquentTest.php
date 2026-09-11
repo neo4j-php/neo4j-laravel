@@ -5,7 +5,9 @@ namespace Neo4j\Neo4jLaravel\Tests\Integration;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasManyThrough;
 use Illuminate\Database\Eloquent\Relations\HasOne;
+use Illuminate\Database\Eloquent\Relations\HasOneThrough;
 use Illuminate\Database\Eloquent\SoftDeletes;
 use Illuminate\Pagination\CursorPaginator;
 use Illuminate\Pagination\LengthAwarePaginator;
@@ -31,6 +33,14 @@ final class Neo4jEloquentTest extends TestCase
             ->statement('MATCH (n:Role) DETACH DELETE n');
         $this->app->make('db')->connection('neo4j')
             ->statement('MATCH (n:RoleUser) DETACH DELETE n');
+        $this->app->make('db')->connection('neo4j')
+            ->statement('MATCH (n:Country) DETACH DELETE n');
+        $this->app->make('db')->connection('neo4j')
+            ->statement('MATCH (n:Mechanic) DETACH DELETE n');
+        $this->app->make('db')->connection('neo4j')
+            ->statement('MATCH (n:Car) DETACH DELETE n');
+        $this->app->make('db')->connection('neo4j')
+            ->statement('MATCH (n:Owner) DETACH DELETE n');
     }
 
     public function testEloquentModelSupportsBasicCrud(): void
@@ -269,6 +279,110 @@ final class Neo4jEloquentTest extends TestCase
         self::assertSame('admin', $constrained->roles->first()->name);
         self::assertSame($user->id, $constrained->roles->first()->pivot->user_id);
     }
+
+    public function testEloquentHasManyThroughPosts(): void
+    {
+        $india = Country::create(['name' => 'India']);
+        $usa = Country::create(['name' => 'USA']);
+
+        $ada = User::create(['name' => 'Ada', 'country_id' => $india->id]);
+        $alan = User::create(['name' => 'Alan', 'country_id' => $india->id]);
+        $grace = User::create(['name' => 'Grace', 'country_id' => $usa->id]);
+
+        $ada->posts()->create(['title' => 'Graphs']);
+        $ada->posts()->create(['title' => 'Cypher']);
+        $alan->posts()->create(['title' => 'Indexes']);
+        $grace->posts()->create(['title' => 'Elsewhere']);
+
+        $posts = $india->fresh()->posts;
+        self::assertCount(3, $posts);
+        self::assertSame(['Cypher', 'Graphs', 'Indexes'], $posts->pluck('title')->sort()->values()->all());
+
+        $loaded = Country::with('posts')->where('id', $india->id)->firstOrFail();
+        self::assertTrue($loaded->relationLoaded('posts'));
+        self::assertCount(3, $loaded->posts);
+    }
+
+    public function testEloquentHasManyThroughRelationQueryConstraints(): void
+    {
+        $india = Country::create(['name' => 'India']);
+        $usa = Country::create(['name' => 'USA']);
+
+        $ada = User::create(['name' => 'Ada', 'country_id' => $india->id]);
+        $alan = User::create(['name' => 'Alan', 'country_id' => $india->id]);
+        User::create(['name' => 'Grace', 'country_id' => $usa->id])
+            ->posts()->create(['title' => 'Elsewhere']);
+
+        $ada->posts()->create(['title' => 'Graphs']);
+        $ada->posts()->create(['title' => 'Cypher']);
+        $alan->posts()->create(['title' => 'Indexes']);
+
+        $filtered = $india->posts()->where('title', 'Graphs')->get();
+        self::assertCount(1, $filtered);
+        self::assertSame('Graphs', $filtered->first()->title);
+
+        self::assertSame(3, $india->posts()->count());
+        self::assertSame(1, $india->posts()->where('title', 'Cypher')->count());
+        self::assertTrue($india->posts()->where('title', 'Indexes')->exists());
+        self::assertFalse($india->posts()->where('title', 'Elsewhere')->exists());
+
+        $ordered = $india->posts()->orderBy('title')->pluck('title')->all();
+        self::assertSame(['Cypher', 'Graphs', 'Indexes'], $ordered);
+
+        $constrained = Country::with(['posts' => static function ($query): void {
+            $query->where('title', 'Graphs')->orderBy('title');
+        }])->where('id', $india->id)->firstOrFail();
+
+        self::assertTrue($constrained->relationLoaded('posts'));
+        self::assertCount(1, $constrained->posts);
+        self::assertSame('Graphs', $constrained->posts->first()->title);
+    }
+
+    public function testEloquentHasOneThroughOwner(): void
+    {
+        $mechanic = Mechanic::create(['name' => 'Tony']);
+        $other = Mechanic::create(['name' => 'Sam']);
+
+        $car = Car::create(['model' => 'Civic', 'mechanic_id' => $mechanic->id]);
+        Car::create(['model' => 'Focus', 'mechanic_id' => $other->id]);
+
+        $owner = Owner::create(['name' => 'Ada', 'car_id' => $car->id]);
+
+        $found = $mechanic->fresh()->carOwner;
+        self::assertInstanceOf(Owner::class, $found);
+        self::assertSame($owner->id, $found->id);
+        self::assertSame('Ada', $found->name);
+
+        $loaded = Mechanic::with('carOwner')->where('id', $mechanic->id)->firstOrFail();
+        self::assertTrue($loaded->relationLoaded('carOwner'));
+        self::assertSame('Ada', $loaded->carOwner->name);
+    }
+
+    public function testEloquentHasOneThroughRelationQueryConstraints(): void
+    {
+        $mechanic = Mechanic::create(['name' => 'Tony']);
+        $car = Car::create(['model' => 'Civic', 'mechanic_id' => $mechanic->id]);
+        Owner::create(['name' => 'Ada', 'car_id' => $car->id]);
+
+        self::assertTrue($mechanic->carOwner()->where('name', 'Ada')->exists());
+        self::assertFalse($mechanic->carOwner()->where('name', 'Missing')->exists());
+        self::assertSame(1, $mechanic->carOwner()->count());
+        self::assertSame('Ada', $mechanic->carOwner()->where('name', 'Ada')->first()?->name);
+
+        $constrained = Mechanic::with(['carOwner' => static function ($query): void {
+            $query->where('name', 'Ada');
+        }])->where('id', $mechanic->id)->firstOrFail();
+
+        self::assertTrue($constrained->relationLoaded('carOwner'));
+        self::assertSame('Ada', $constrained->carOwner->name);
+
+        $empty = Mechanic::with(['carOwner' => static function ($query): void {
+            $query->where('name', 'Missing');
+        }])->where('id', $mechanic->id)->firstOrFail();
+
+        self::assertTrue($empty->relationLoaded('carOwner'));
+        self::assertNull($empty->carOwner);
+    }
 }
 
 final class User extends Neo4jModel
@@ -335,5 +449,43 @@ final class Role extends Neo4jModel
     {
         return $this->belongsToMany(User::class, 'RoleUser', 'role_id', 'user_id');
     }
+}
+
+final class Country extends Neo4jModel
+{
+    protected $table = 'Country';
+
+    protected $guarded = [];
+
+    public function posts(): HasManyThrough
+    {
+        return $this->hasManyThrough(Post::class, User::class, 'country_id', 'user_id', 'id', 'id');
+    }
+}
+
+final class Mechanic extends Neo4jModel
+{
+    protected $table = 'Mechanic';
+
+    protected $guarded = [];
+
+    public function carOwner(): HasOneThrough
+    {
+        return $this->hasOneThrough(Owner::class, Car::class, 'mechanic_id', 'car_id', 'id', 'id');
+    }
+}
+
+final class Car extends Neo4jModel
+{
+    protected $table = 'Car';
+
+    protected $guarded = [];
+}
+
+final class Owner extends Neo4jModel
+{
+    protected $table = 'Owner';
+
+    protected $guarded = [];
 }
 

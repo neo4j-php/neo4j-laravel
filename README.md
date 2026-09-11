@@ -197,6 +197,7 @@ Foreign-key relations work with stock Eloquent APIs against node properties
 - one-to-many: `hasMany` / `belongsTo`
 - many-to-many: stock `belongsToMany` via a pivot **label** (node), e.g. `RoleUser`
   with `user_id` and `role_id` (Eloquent joins compile to multi-node MATCH + WHERE)
+- through: stock `hasOneThrough` / `hasManyThrough` (same cartesian join compilation)
 
 Including lazy load, `with(...)` eager load, `$user->profile()->create([...])`,
 `$user->posts()->create([...])`, and `$user->roles()->attach([...])` / `detach`.
@@ -210,6 +211,8 @@ For a dedicated graph model, the package also provides
 use Neo4j\Neo4jLaravel\Neo4jModel;
 use Illuminate\Database\Eloquent\Relations\HasOne;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasManyThrough;
+use Illuminate\Database\Eloquent\Relations\HasOneThrough;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 
@@ -263,6 +266,26 @@ class Role extends Neo4jModel
     }
 }
 
+class Country extends Neo4jModel
+{
+    protected $guarded = [];
+
+    public function posts(): HasManyThrough
+    {
+        return $this->hasManyThrough(Post::class, User::class, 'country_id', 'user_id', 'id', 'id');
+    }
+}
+
+class Mechanic extends Neo4jModel
+{
+    protected $guarded = [];
+
+    public function carOwner(): HasOneThrough
+    {
+        return $this->hasOneThrough(Owner::class, Car::class, 'mechanic_id', 'car_id', 'id', 'id');
+    }
+}
+
 $user = User::create(['name' => 'Ada']);
 $user->profile()->create(['bio' => 'Engineer']);
 $user->posts()->create(['title' => 'First']);
@@ -273,6 +296,9 @@ $user->roles()->attach($admin->id);
 $user = User::with(['profile', 'posts', 'roles'])->where('name', 'Ada')->first();
 $user->profile->bio; // Engineer
 $user->roles->pluck('name'); // ['admin']
+
+$country = Country::with('posts')->where('name', 'India')->first();
+$mechanic = Mechanic::with('carOwner')->first();
 ```
 
 ### Using Neo4j Client Interface
