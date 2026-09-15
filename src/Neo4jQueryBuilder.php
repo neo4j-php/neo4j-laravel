@@ -3,6 +3,8 @@
 namespace Neo4j\Neo4jLaravel;
 
 use Closure;
+use Illuminate\Database\Eloquent\Builder as EloquentBuilder;
+use Illuminate\Database\Eloquent\Relations\Relation;
 use Illuminate\Database\Query\Builder;
 use InvalidArgumentException;
 
@@ -24,8 +26,11 @@ final class Neo4jQueryBuilder extends Builder
     }
 
     /**
-     * Keep whereIn subqueries as builders so the grammar can emit Cypher
-     * COLLECT { } without shadowing the outer primary variable `n`.
+     * Keep whereIn subqueries as builders (same AST shape as whereExists) so the
+     * grammar can emit Cypher COLLECT { } without shadowing the outer `n`.
+     *
+     * Covers the full isQueryable() set: Closure, Query\Builder, Eloquent\Builder,
+     * and Relation — not only Closure|Query\Builder.
      *
      * @param  \Illuminate\Contracts\Database\Query\Expression|string|\Closure|self  $column
      * @param  mixed  $values
@@ -35,9 +40,15 @@ final class Neo4jQueryBuilder extends Builder
     #[\Override]
     public function whereIn($column, $values, $boolean = 'and', $not = false)
     {
-        if ($values instanceof Closure) {
-            $query = $this->forSubQuery();
-            $values($query);
+        if ($this->isQueryable($values)) {
+            if ($values instanceof Closure) {
+                $query = $this->forSubQuery();
+                $values($query);
+            } else {
+                $query = ($values instanceof EloquentBuilder || $values instanceof Relation)
+                    ? $values->toBase()
+                    : $values;
+            }
 
             $this->wheres[] = [
                 'type' => $not ? 'NotInSub' : 'InSub',
@@ -47,19 +58,6 @@ final class Neo4jQueryBuilder extends Builder
             ];
 
             $this->addBinding($query->getBindings(), 'where');
-
-            return $this;
-        }
-
-        if ($values instanceof Builder) {
-            $this->wheres[] = [
-                'type' => $not ? 'NotInSub' : 'InSub',
-                'column' => $column,
-                'query' => $values,
-                'boolean' => $boolean,
-            ];
-
-            $this->addBinding($values->getBindings(), 'where');
 
             return $this;
         }

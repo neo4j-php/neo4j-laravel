@@ -526,6 +526,82 @@ final class Neo4jQueryGrammarTest extends TestCase
         self::assertSame([], $builder->getBindings());
     }
 
+    public function testWhereInSubqueryKeepsOuterCorrelation(): void
+    {
+        $builder = $this->neo4jBuilder()
+            ->from('User')
+            ->whereIn('id', function (Builder $query): void {
+                $query->select('user_id')
+                    ->from('Post')
+                    ->whereColumn('Post.owner_id', 'User.id');
+            });
+
+        self::assertSame(
+            'MATCH (n:User) WHERE n.id IN COLLECT { MATCH (Post:Post) WHERE Post.owner_id = n.id RETURN Post.user_id } RETURN n',
+            $builder->toSql()
+        );
+    }
+
+    public function testWhereInWithQueryBuilderUsesInSubNotExpression(): void
+    {
+        $outer = $this->neo4jBuilder()->from('User');
+        $inner = $this->neo4jBuilder()->from('Post')->select('user_id');
+
+        $outer->whereIn('id', $inner);
+
+        self::assertSame('InSub', $outer->wheres[0]['type']);
+        self::assertInstanceOf(Builder::class, $outer->wheres[0]['query']);
+    }
+
+    public function testStockBuilderWhereInSubqueryRejectsCompiledExpression(): void
+    {
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('Compiled whereIn subquery expressions are not supported');
+
+        $this->builder()
+            ->from('User')
+            ->whereIn('id', function (Builder $query): void {
+                $query->select('user_id')->from('Post');
+            })
+            ->toSql();
+    }
+
+    public function testExistsSubqueryDoesNotReuseOuterJoinAliasSq(): void
+    {
+        $builder = $this->neo4jBuilder()
+            ->from('User')
+            ->join('Audit as sq', 'User.id', '=', 'sq.user_id')
+            ->whereExists(function (Builder $query): void {
+                $query->from('Post as n')
+                    ->whereColumn('n.user_id', 'User.id');
+            });
+
+        $cypher = $builder->toSql();
+
+        self::assertStringContainsString('MATCH (n:User), (sq:Audit)', $cypher);
+        self::assertDoesNotMatchRegularExpression('/EXISTS \{ MATCH \(sq:/', $cypher);
+        self::assertMatchesRegularExpression('/EXISTS \{ MATCH \(sq\d+:Post\)/', $cypher);
+    }
+
+    public function testWhereInClosureAndBuilderCompileTheSame(): void
+    {
+        $viaClosure = $this->neo4jBuilder()
+            ->from('User')
+            ->whereIn('id', function (Builder $query): void {
+                $query->select('user_id')->from('Post')->where('published', true);
+            });
+
+        $viaBuilder = $this->neo4jBuilder()
+            ->from('User')
+            ->whereIn(
+                'id',
+                $this->neo4jBuilder()->from('Post')->select('user_id')->where('published', true)
+            );
+
+        self::assertSame($viaClosure->toSql(), $viaBuilder->toSql());
+        self::assertSame($viaClosure->getBindings(), $viaBuilder->getBindings());
+    }
+
     public function testCompilesUnionQueries(): void
     {
         $first = $this->builder()->from('User')->where('role', 'admin')->select('name');
