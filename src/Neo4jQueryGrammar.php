@@ -30,6 +30,8 @@ use WikibaseSolutions\CypherDSL\Types\PropertyTypes\BooleanType;
  *   - limit   -> LIMIT
  *   - offset  -> SKIP
  *   - union / unionAll
+ *   - whereIn / whereNotIn with subquery -> IN COLLECT { ... }
+ *   - whereExists / whereNotExists -> EXISTS { ... } / NOT EXISTS { ... }
  *   - insert   -> CREATE
  *   - update   -> MATCH / SET (including increment/decrement expressions)
  *   - delete   -> MATCH / DETACH DELETE
@@ -39,6 +41,8 @@ use WikibaseSolutions\CypherDSL\Types\PropertyTypes\BooleanType;
 final class Neo4jQueryGrammar extends Grammar
 {
     private int $parameterIndex = 0;
+
+    private int $subqueryIndex = 0;
 
     public function __construct()
     {
@@ -105,6 +109,7 @@ final class Neo4jQueryGrammar extends Grammar
     public function compileSelect(Builder $query): string
     {
         $this->parameterIndex = 0;
+        $this->subqueryIndex = 0;
 
         return $this->compileSelectBody($query);
     }
@@ -205,7 +210,10 @@ final class Neo4jQueryGrammar extends Grammar
     private function compileVariableMap(Builder $query): array
     {
         $from = $this->parseTableName($query->from);
-        $map = [$from['name'] => 'n'];
+        $map = [
+            '' => 'n',
+            $from['name'] => 'n',
+        ];
 
         if ($from['alias'] !== null) {
             $map[$from['alias']] = 'n';
@@ -647,6 +655,7 @@ final class Neo4jQueryGrammar extends Grammar
     public function compileWheres(Builder $query): string
     {
         $this->parameterIndex = 0;
+        $this->subqueryIndex = 0;
 
         $wheres = $this->mergeJoinWheres($query);
 
@@ -663,6 +672,7 @@ final class Neo4jQueryGrammar extends Grammar
     public function compileExists(Builder $query): string
     {
         $this->parameterIndex = 0;
+        $this->subqueryIndex = 0;
 
         if ($this->hasVectorSimilarity($query)) {
             throw new RuntimeException('exists() is not supported with whereVectorSimilarTo().');
@@ -718,6 +728,10 @@ final class Neo4jQueryGrammar extends Grammar
             'NotNull' => $this->compileColumn((string) $where['column'], $variables)->isNotNull(),
             'In' => $this->compileInWhere($where, $variables, false),
             'NotIn' => $this->compileInWhere($where, $variables, true),
+            'InSub' => $this->compileInSubWhere($where, $variables, false),
+            'NotInSub' => $this->compileInSubWhere($where, $variables, true),
+            'Exists' => $this->compileExistsWhere($where, $variables, false),
+            'NotExists' => $this->compileExistsWhere($where, $variables, true),
             'between' => $this->compileBetweenWhere($where, $variables),
             'Nested' => $this->compileNestedWhere($where, $variables),
             'Column' => $this->compileColumnWhere($where, $variables),
@@ -829,6 +843,13 @@ final class Neo4jQueryGrammar extends Grammar
         $column = $this->compileColumn((string) $where['column'], $variables);
         $values = $where['values'] ?? [];
 
+        if (count($values) === 1 && $this->isExpression($values[0])) {
+            throw new RuntimeException(
+                'Compiled whereIn subquery expressions are not supported on Neo4j Query Builder; '
+                .'use the connection query builder so subqueries stay as builders (InSub).'
+            );
+        }
+
         $params = [];
         foreach ($values as $ignored) {
             $params[] = $this->nextParameter();
@@ -841,6 +862,126 @@ final class Neo4jQueryGrammar extends Grammar
         $clause = new In($column, Query::list($params));
 
         return $negate ? $clause->not() : $clause;
+    }
+
+    /**
+     * @param  array<string, mixed>  $where
+     * @param  array<string, string>  $variables
+     */
+    private function compileInSubWhere(array $where, array $variables, bool $negate): BooleanType
+    {
+        $sub = $where['query'] ?? null;
+        if (! $sub instanceof Builder) {
+            throw new RuntimeException('Invalid whereIn subquery for Neo4j Query Builder.');
+        }
+
+        $column = $this->compileColumn((string) $where['column'], $variables)->toQuery();
+        $subquery = $this->compileCollectSubquery($sub, $variables);
+        $clause = $column.' IN COLLECT { '.$subquery.' }';
+
+        return Query::rawExpression($negate ? 'NOT ('.$clause.')' : $clause);
+    }
+
+    /**
+     * @param  array<string, mixed>  $where
+     * @param  array<string, string>  $variables
+     */
+    private function compileExistsWhere(array $where, array $variables, bool $negate): BooleanType
+    {
+        $sub = $where['query'] ?? null;
+        if (! $sub instanceof Builder) {
+            throw new RuntimeException('Invalid whereExists subquery for Neo4j Query Builder.');
+        }
+
+        $body = $this->compileExistsSubqueryBody($sub, $variables);
+        $clause = ($negate ? 'NOT EXISTS' : 'EXISTS').' { '.$body.' }';
+
+        return Query::rawExpression($clause);
+    }
+
+    /**
+     * @param  array<string, string>  $outerVariables
+     */
+    private function compileCollectSubquery(Builder $query, array $outerVariables): string
+    {
+        [$match, $subVariables] = $this->compileSubqueryMatch($query, $outerVariables);
+        $cypher = $match;
+        $where = $this->compileWhereExpression($query->wheres ?? [], $subVariables);
+
+        if ($where !== null) {
+            $cypher .= ' '.Query::new()->where($where)->build();
+        }
+
+        $columns = $query->columns ?? null;
+        if (! is_array($columns) || count($columns) !== 1) {
+            throw new RuntimeException('whereIn subquery must select exactly one column on Neo4j Query Builder.');
+        }
+
+        $column = $columns[0];
+        $return = $this->isExpression($column)
+            ? (string) $this->getValue($column)
+            : $this->compileColumn((string) $column, $subVariables)->toQuery();
+
+        return $cypher.' RETURN '.$return;
+    }
+
+    /**
+     * @param  array<string, string>  $outerVariables
+     */
+    private function compileExistsSubqueryBody(Builder $query, array $outerVariables): string
+    {
+        [$match, $subVariables] = $this->compileSubqueryMatch($query, $outerVariables);
+        $where = $this->compileWhereExpression($query->wheres ?? [], $subVariables);
+
+        if ($where === null) {
+            return $match;
+        }
+
+        return $match.' '.Query::new()->where($where)->build();
+    }
+
+    /**
+     * @param  array<string, string>  $outerVariables
+     * @return array{0: string, 1: array<string, string>}
+     */
+    private function compileSubqueryMatch(Builder $query, array $outerVariables): array
+    {
+        $from = $this->parseTableName($query->from);
+        $variable = $from['alias'] ?? $from['name'];
+        $this->assertIdentifier($variable);
+
+        // Outer queries bind the primary label to `n`; avoid shadowing it or any
+        // already-bound join/subquery variable (sq0, sq1, …).
+        if ($variable === 'n' || in_array($variable, $outerVariables, true)) {
+            $variable = $this->allocateSubqueryVariable($outerVariables);
+        }
+
+        if (! empty($query->joins)) {
+            throw new RuntimeException('Joins inside subqueries are not supported on Neo4j Query Builder yet.');
+        }
+
+        $subVariables = $outerVariables;
+        $subVariables[''] = $variable;
+        $subVariables[$from['name']] = $variable;
+
+        if ($from['alias'] !== null) {
+            $subVariables[$from['alias']] = $variable;
+        }
+
+        return ['MATCH ('.$variable.':'.$from['name'].')', $subVariables];
+    }
+
+    /**
+     * @param  array<string, string>  $outerVariables
+     */
+    private function allocateSubqueryVariable(array $outerVariables): string
+    {
+        do {
+            $candidate = 'sq'.$this->subqueryIndex;
+            $this->subqueryIndex++;
+        } while ($candidate === 'n' || in_array($candidate, $outerVariables, true));
+
+        return $candidate;
     }
 
     /**
@@ -1076,7 +1217,7 @@ final class Neo4jQueryGrammar extends Grammar
 
         $this->assertIdentifier($column);
 
-        return Query::variable('n')->property($column);
+        return Query::variable($variables[''] ?? 'n')->property($column);
     }
 
     private function assertIdentifier(string $identifier): void
@@ -1129,6 +1270,7 @@ final class Neo4jQueryGrammar extends Grammar
     public function compileUpdate(Builder $query, array $values)
     {
         $this->parameterIndex = 0;
+        $this->subqueryIndex = 0;
 
         if (! empty($query->joins)) {
             throw new RuntimeException('Updates with joins are not supported on Neo4j Query Builder.');
@@ -1166,6 +1308,7 @@ final class Neo4jQueryGrammar extends Grammar
     public function compileDelete(Builder $query)
     {
         $this->parameterIndex = 0;
+        $this->subqueryIndex = 0;
 
         if (! empty($query->joins)) {
             throw new RuntimeException('Deletes with joins are not supported on Neo4j Query Builder.');
