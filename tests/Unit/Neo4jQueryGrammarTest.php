@@ -353,6 +353,36 @@ final class Neo4jQueryGrammarTest extends TestCase
         self::assertSame(['user-1'], $builder->getBindings());
     }
 
+    public function testCompilesFromTableAlias(): void
+    {
+        $builder = $this->builder()
+            ->from('User as u')
+            ->where('u.name', 'Ada')
+            ->select(['u.name']);
+
+        self::assertSame(
+            'MATCH (n:User) WHERE (n.name = $p0) RETURN n.name',
+            $builder->toSql()
+        );
+        self::assertSame(['Ada'], $builder->getBindings());
+    }
+
+    public function testCompilesJoinTableAlias(): void
+    {
+        $builder = $this->builder()
+            ->from('User as u')
+            ->join('RoleUser as ru', 'u.id', '=', 'ru.user_id')
+            ->where('ru.role_id', 'role-1')
+            ->select(['u.name', 'ru.role_id']);
+
+        self::assertSame(
+            'MATCH (n:User), (ru:RoleUser) WHERE (n.id = ru.user_id AND (ru.role_id = $p0)) '
+                .'RETURN n.name, ru.role_id',
+            $builder->toSql()
+        );
+        self::assertSame(['role-1'], $builder->getBindings());
+    }
+
     public function testCompilesJoinAggregatesAndExists(): void
     {
         $count = $this->builder()
@@ -432,6 +462,70 @@ final class Neo4jQueryGrammarTest extends TestCase
         self::assertSame(['post-1', 'Post'], $builder->getBindings());
     }
 
+    public function testCompilesWhereInSubquery(): void
+    {
+        $builder = $this->neo4jBuilder()
+            ->from('User')
+            ->whereIn('id', function (Builder $query): void {
+                $query->select('user_id')->from('Post');
+            });
+
+        self::assertSame(
+            'MATCH (n:User) WHERE n.id IN COLLECT { MATCH (Post:Post) RETURN Post.user_id } RETURN n',
+            $builder->toSql()
+        );
+        self::assertSame([], $builder->getBindings());
+    }
+
+    public function testCompilesWhereNotInSubquery(): void
+    {
+        $builder = $this->neo4jBuilder()
+            ->from('User')
+            ->whereNotIn('id', function (Builder $query): void {
+                $query->select('user_id')->from('Post');
+            });
+
+        self::assertSame(
+            'MATCH (n:User) WHERE NOT (n.id IN COLLECT { MATCH (Post:Post) RETURN Post.user_id }) RETURN n',
+            $builder->toSql()
+        );
+        self::assertSame([], $builder->getBindings());
+    }
+
+    public function testCompilesWhereExistsSubquery(): void
+    {
+        $builder = $this->neo4jBuilder()
+            ->from('User')
+            ->whereExists(function (Builder $query): void {
+                $query->from('Post')
+                    ->whereColumn('Post.user_id', 'User.id')
+                    ->where('published', true);
+            });
+
+        self::assertSame(
+            'MATCH (n:User) WHERE EXISTS { MATCH (Post:Post) '
+                .'WHERE (Post.user_id = n.id AND (Post.published = $p0)) } RETURN n',
+            $builder->toSql()
+        );
+        self::assertSame([true], $builder->getBindings());
+    }
+
+    public function testCompilesWhereNotExistsSubquery(): void
+    {
+        $builder = $this->neo4jBuilder()
+            ->from('User')
+            ->whereNotExists(function (Builder $query): void {
+                $query->from('Post')
+                    ->whereColumn('Post.user_id', 'User.id');
+            });
+
+        self::assertSame(
+            'MATCH (n:User) WHERE NOT EXISTS { MATCH (Post:Post) WHERE Post.user_id = n.id } RETURN n',
+            $builder->toSql()
+        );
+        self::assertSame([], $builder->getBindings());
+    }
+
     public function testCompilesUnionQueries(): void
     {
         $first = $this->builder()->from('User')->where('role', 'admin')->select('name');
@@ -447,6 +541,15 @@ final class Neo4jQueryGrammarTest extends TestCase
     }
 
     private function vectorBuilder(): Neo4jQueryBuilder
+    {
+        return new Neo4jQueryBuilder(
+            $this->createMock(ConnectionInterface::class),
+            new Neo4jQueryGrammar(),
+            new Processor()
+        );
+    }
+
+    private function neo4jBuilder(): Neo4jQueryBuilder
     {
         return new Neo4jQueryBuilder(
             $this->createMock(ConnectionInterface::class),
