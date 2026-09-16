@@ -6,11 +6,24 @@ use Illuminate\Database\Query\Builder;
 use InvalidArgumentException;
 
 /**
- * Query builder with Neo4j-specific clauses such as vector similarity search.
+ * Query builder with Neo4j-specific clauses such as vector similarity search
+ * and graph relationship matching.
  */
 final class Neo4jQueryBuilder extends Builder
 {
     public ?string $vectorIndex = null;
+
+    /**
+     * Graph relationships to include in MATCH as first-class Cypher relationships.
+     *
+     * @var list<array{
+     *     type: string,
+     *     related: string,
+     *     relationship: string,
+     *     relatedAlias: string
+     * }>
+     */
+    public array $graphRelationships = [];
 
     /**
      * Restrict vector search to a named Neo4j vector index.
@@ -18,6 +31,33 @@ final class Neo4jQueryBuilder extends Builder
     public function useVectorIndex(string $name): static
     {
         $this->vectorIndex = $name;
+
+        return $this;
+    }
+
+    /**
+     * Match a Neo4j relationship between the from() node and a related label.
+     *
+     * Example:
+     *   DB::table('Bar')->havingRelationship('Bar2', 'Foo')
+     *   -> MATCH (n:Bar)-[bar2:Bar2]-(foo:Foo) RETURN n, bar2, foo
+     *
+     * Relationship and related-node aliases default to a Cypher-friendly form
+     * of the type/label (lcfirst for PascalCase, lower for SCREAMING_SNAKE) so
+     * where('bar2.status', ...) and where('foo.name', ...) resolve correctly.
+     */
+    public function havingRelationship(
+        string $type,
+        string $related,
+        ?string $relationshipAlias = null,
+        ?string $relatedAlias = null
+    ): static {
+        $this->graphRelationships[] = [
+            'type' => $type,
+            'related' => $related,
+            'relationship' => $relationshipAlias ?? $this->defaultGraphAlias($type),
+            'relatedAlias' => $relatedAlias ?? $this->defaultGraphAlias($related),
+        ];
 
         return $this;
     }
@@ -62,5 +102,14 @@ final class Neo4jQueryBuilder extends Builder
         $this->addBinding((float) $minSimilarity, 'where');
 
         return $this;
+    }
+
+    private function defaultGraphAlias(string $name): string
+    {
+        if (strtoupper($name) === $name) {
+            return strtolower($name);
+        }
+
+        return lcfirst($name);
     }
 }
