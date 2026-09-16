@@ -20,12 +20,14 @@ use WikibaseSolutions\CypherDSL\Types\PropertyTypes\BooleanType;
  *   - from() / table() -> MATCH (n:Label)
  *   - join()           -> MATCH (n:Label), (join:JoinLabel) + equality WHERE
  *                        (cartesian-product style; inner/cross only)
+ *   - havingRelationship(type, related) -> MATCH (n:Label)-[rel:Type]-(related:Related)
+ *                        (relationship is a first-class Cypher element)
  *   - select(columns)  -> RETURN n.col, ... (including `as` aliases / table.*)
  *   - where (Basic, Null, NotNull, In, NotIn, Between/NotBetween, Nested,
  *            Column, raw, Date, Time, Day, Month, Year)
  *   - whereVectorSimilarTo -> CALL db.index.vector.queryNodes
  *   - aggregates, exists()
- *   - groupBy / having (basic; not combined with joins yet)
+ *   - groupBy / having (basic; not combined with joins / relationships yet)
  *   - orderBy -> ORDER BY
  *   - limit   -> LIMIT
  *   - offset  -> SKIP
@@ -155,6 +157,10 @@ final class Neo4jQueryGrammar extends Grammar
             throw new RuntimeException('Joins cannot be combined with whereVectorSimilarTo().');
         }
 
+        if ($this->graphRelationships($query) !== [] && $this->hasVectorSimilarity($query)) {
+            throw new RuntimeException('havingRelationship() cannot be combined with whereVectorSimilarTo().');
+        }
+
         $variables = $this->compileVariableMap($query);
         $prefix = $this->compileMatchPrefix($query);
         $where = $this->compileWhereExpression($this->mergeJoinWheres($query), $variables);
@@ -168,8 +174,8 @@ final class Neo4jQueryGrammar extends Grammar
         }
 
         if (! empty($query->groups) || ! empty($query->havings)) {
-            if (! empty($query->joins)) {
-                throw new RuntimeException('groupBy/having with joins is not supported on Neo4j Query Builder yet.');
+            if (! empty($query->joins) || $this->graphRelationships($query) !== []) {
+                throw new RuntimeException('groupBy/having with joins or havingRelationship() is not supported on Neo4j Query Builder yet.');
             }
 
             return $this->compileGroupedSelect($query, $prefix, $variables);
@@ -194,11 +200,27 @@ final class Neo4jQueryGrammar extends Grammar
     }
 
     /**
+     * @return list<array{
+     *     type: string,
+     *     related: string,
+     *     relationship: string,
+     *     relatedAlias: string
+     * }>
+     */
+    private function graphRelationships(Builder $query): array
+    {
+        return $query instanceof Neo4jQueryBuilder ? $query->graphRelationships : [];
+    }
+
+    /**
      * Map table / alias names to Cypher variables.
      *
      * The primary from() label is always bound to "n". Joined labels use their
      * table name (or explicit alias) as the variable, enabling cartesian joins:
      * MATCH (n:Role), (RoleUser:RoleUser) WHERE n.id = RoleUser.role_id
+     *
+     * havingRelationship() aliases map both the type/label and the Cypher
+     * variable so where('bar2.status') and where('Bar2.status') both work.
      *
      * @return array<string, string>
      */
@@ -231,6 +253,18 @@ final class Neo4jQueryGrammar extends Grammar
             }
         }
 
+        foreach ($this->graphRelationships($query) as $relationship) {
+            $this->assertIdentifier($relationship['relationship']);
+            $this->assertIdentifier($relationship['relatedAlias']);
+            $this->assertIdentifier($relationship['type']);
+            $this->assertLabel($relationship['related']);
+
+            $map[$relationship['type']] = $relationship['relationship'];
+            $map[$relationship['relationship']] = $relationship['relationship'];
+            $map[$relationship['related']] = $relationship['relatedAlias'];
+            $map[$relationship['relatedAlias']] = $relationship['relatedAlias'];
+        }
+
         return $map;
     }
 
@@ -260,6 +294,16 @@ final class Neo4jQueryGrammar extends Grammar
     private function compileMatchPrefix(Builder $query): string
     {
         $from = $this->parseTableName($query->from);
+        $relationships = $this->graphRelationships($query);
+
+        if ($relationships !== [] && ! empty($query->joins)) {
+            throw new RuntimeException('havingRelationship() cannot be combined with join() on Neo4j Query Builder.');
+        }
+
+        if ($relationships !== []) {
+            return $this->compileRelationshipMatchPrefix($from['name'], $relationships);
+        }
+
         $patterns = ['(n:'.$from['name'].')'];
         $seen = ['n' => true];
 
@@ -273,6 +317,37 @@ final class Neo4jQueryGrammar extends Grammar
 
             $seen[$variable] = true;
             $patterns[] = "({$variable}:{$table['name']})";
+        }
+
+        return 'MATCH '.implode(', ', $patterns);
+    }
+
+    /**
+     * @param  list<array{
+     *     type: string,
+     *     related: string,
+     *     relationship: string,
+     *     relatedAlias: string
+     * }>  $relationships
+     */
+    private function compileRelationshipMatchPrefix(string $fromLabel, array $relationships): string
+    {
+        $patterns = [];
+
+        foreach ($relationships as $index => $relationship) {
+            $this->assertIdentifier($relationship['type']);
+            $this->assertIdentifier($relationship['relationship']);
+            $this->assertIdentifier($relationship['relatedAlias']);
+            $this->assertLabel($relationship['related']);
+
+            $rel = "[{$relationship['relationship']}:{$relationship['type']}]";
+            $related = "({$relationship['relatedAlias']}:{$relationship['related']})";
+
+            if ($index === 0) {
+                $patterns[] = "(n:{$fromLabel})-{$rel}-{$related}";
+            } else {
+                $patterns[] = "(n)-{$rel}-{$related}";
+            }
         }
 
         return 'MATCH '.implode(', ', $patterns);
@@ -563,7 +638,7 @@ final class Neo4jQueryGrammar extends Grammar
         $distinct = $query->distinct ? 'DISTINCT ' : '';
 
         if ($columns === null || $columns === [] || $columns === ['*']) {
-            return $distinct.'n';
+            return $distinct.$this->compileDefaultReturn($query);
         }
 
         $parts = [];
@@ -575,11 +650,11 @@ final class Neo4jQueryGrammar extends Grammar
             }
 
             if (! is_string($column)) {
-                return $distinct.'n';
+                return $distinct.$this->compileDefaultReturn($query);
             }
 
             if ($column === '*') {
-                $parts[] = 'n';
+                $parts[] = $this->compileDefaultReturn($query);
 
                 continue;
             }
@@ -588,6 +663,18 @@ final class Neo4jQueryGrammar extends Grammar
         }
 
         return $distinct.implode(', ', $parts);
+    }
+
+    private function compileDefaultReturn(Builder $query): string
+    {
+        $parts = ['n'];
+
+        foreach ($this->graphRelationships($query) as $relationship) {
+            $parts[] = $relationship['relationship'];
+            $parts[] = $relationship['relatedAlias'];
+        }
+
+        return implode(', ', $parts);
     }
 
     /**
@@ -607,6 +694,9 @@ final class Neo4jQueryGrammar extends Grammar
             $expression = 'n';
         } elseif (preg_match('/^([A-Za-z_][A-Za-z0-9_]*)\.\*$/', $column, $matches) === 1) {
             $expression = $variables[$matches[1]] ?? 'n';
+        } elseif (! str_contains($column, '.') && (isset($variables[$column]) || in_array($column, $variables, true))) {
+            // Whole node / relationship variable (e.g. select bar2, foo).
+            $expression = $variables[$column] ?? $column;
         } else {
             $expression = $this->compileColumn($column, $variables)->toQuery();
         }
@@ -1134,6 +1224,10 @@ final class Neo4jQueryGrammar extends Grammar
             throw new RuntimeException('Updates with joins are not supported on Neo4j Query Builder.');
         }
 
+        if ($this->graphRelationships($query) !== []) {
+            throw new RuntimeException('Updates with havingRelationship() are not supported on Neo4j Query Builder.');
+        }
+
         $variables = $this->compileVariableMap($query);
         $node = $this->compileNode($query->from);
         $assignments = [];
@@ -1169,6 +1263,10 @@ final class Neo4jQueryGrammar extends Grammar
 
         if (! empty($query->joins)) {
             throw new RuntimeException('Deletes with joins are not supported on Neo4j Query Builder.');
+        }
+
+        if ($this->graphRelationships($query) !== []) {
+            throw new RuntimeException('Deletes with havingRelationship() are not supported on Neo4j Query Builder.');
         }
 
         $variables = $this->compileVariableMap($query);
