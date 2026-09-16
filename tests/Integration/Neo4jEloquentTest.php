@@ -296,6 +296,121 @@ final class Neo4jEloquentTest extends TestCase
         self::assertSame($user->id, $constrained->roles->first()->pivot->user_id);
     }
 
+    public function testEloquentWhereInSubquerySelectsUsersWithPosts(): void
+    {
+        $ada = User::create(['name' => 'Ada']);
+        $alan = User::create(['name' => 'Alan']);
+
+        $ada->posts()->create(['title' => 'First']);
+
+        $authors = User::query()
+            ->whereIn('id', function ($query): void {
+                $query->select('user_id')->from('Post');
+            })
+            ->orderBy('name')
+            ->get();
+
+        self::assertSame(['Ada'], $authors->pluck('name')->all());
+        self::assertSame($ada->id, $authors->first()->id);
+        self::assertFalse($authors->contains(fn (User $user): bool => $user->id === $alan->id));
+    }
+
+    public function testEloquentWhereExistsSubquerySelectsUsersWithMatchingPosts(): void
+    {
+        $ada = User::create(['name' => 'Ada']);
+        $alan = User::create(['name' => 'Alan']);
+
+        $ada->posts()->create(['title' => 'Graphs']);
+        $alan->posts()->create(['title' => 'Other']);
+
+        $matched = User::query()
+            ->whereExists(function ($query): void {
+                $query->from('Post')
+                    ->whereColumn('Post.user_id', 'User.id')
+                    ->where('title', 'Graphs');
+            })
+            ->get();
+
+        self::assertCount(1, $matched);
+        self::assertSame($ada->id, $matched->first()->id);
+        self::assertSame('Ada', $matched->first()->name);
+    }
+
+    public function testEloquentWhereNotExistsSubqueryExcludesUsersWithPosts(): void
+    {
+        $ada = User::create(['name' => 'Ada']);
+        $alan = User::create(['name' => 'Alan']);
+
+        $ada->posts()->create(['title' => 'First']);
+
+        $withoutPosts = User::query()
+            ->whereNotExists(function ($query): void {
+                $query->from('Post')
+                    ->whereColumn('Post.user_id', 'User.id');
+            })
+            ->orderBy('name')
+            ->get();
+
+        self::assertSame(['Alan'], $withoutPosts->pluck('name')->all());
+        self::assertSame($alan->id, $withoutPosts->first()->id);
+    }
+
+    public function testEloquentWhereInAcceptsEloquentBuilderSubquery(): void
+    {
+        $ada = User::create(['name' => 'Ada']);
+        $alan = User::create(['name' => 'Alan']);
+
+        $ada->posts()->create(['title' => 'First']);
+
+        $authors = User::query()
+            ->whereIn('id', Post::query()->select('user_id'))
+            ->orderBy('name')
+            ->get();
+
+        self::assertSame(['Ada'], $authors->pluck('name')->all());
+        self::assertFalse($authors->contains(fn (User $user): bool => $user->id === $alan->id));
+    }
+
+    public function testEloquentWhereInEloquentBuilderKeepsOuterCorrelation(): void
+    {
+        $ada = User::create(['name' => 'Ada']);
+        User::create(['name' => 'Alan']);
+
+        $ada->posts()->create(['title' => 'Graphs']);
+
+        $matched = User::query()
+            ->whereIn(
+                'id',
+                Post::query()
+                    ->select('user_id')
+                    ->whereColumn('Post.user_id', 'User.id')
+                    ->where('title', 'Graphs')
+            )
+            ->get();
+
+        self::assertCount(1, $matched);
+        self::assertSame($ada->id, $matched->first()->id);
+        self::assertSame('Ada', $matched->first()->name);
+    }
+
+    public function testEloquentWhereInAcceptsRelationSubquery(): void
+    {
+        $ada = User::create(['name' => 'Ada']);
+        $alan = User::create(['name' => 'Alan']);
+
+        $ada->posts()->create(['title' => 'First']);
+        $alan->posts()->create(['title' => 'Other']);
+
+        $authors = User::query()
+            ->whereIn('id', $ada->posts()->select('user_id'))
+            ->orderBy('name')
+            ->get();
+
+        self::assertSame(['Ada'], $authors->pluck('name')->all());
+        self::assertSame($ada->id, $authors->first()->id);
+        self::assertFalse($authors->contains(fn (User $user): bool => $user->id === $alan->id));
+    }
+
     public function testEloquentHasManyThroughPosts(): void
     {
         $india = Country::create(['name' => 'India']);

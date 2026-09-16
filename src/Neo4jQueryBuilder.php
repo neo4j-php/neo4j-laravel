@@ -2,6 +2,9 @@
 
 namespace Neo4j\Neo4jLaravel;
 
+use Closure;
+use Illuminate\Database\Eloquent\Builder as EloquentBuilder;
+use Illuminate\Database\Eloquent\Relations\Relation;
 use Illuminate\Database\Query\Builder;
 use InvalidArgumentException;
 
@@ -20,6 +23,46 @@ final class Neo4jQueryBuilder extends Builder
         $this->vectorIndex = $name;
 
         return $this;
+    }
+
+    /**
+     * Keep whereIn subqueries as builders (same AST shape as whereExists) so the
+     * grammar can emit Cypher COLLECT { } without shadowing the outer `n`.
+     *
+     * Covers the full isQueryable() set: Closure, Query\Builder, Eloquent\Builder,
+     * and Relation — not only Closure|Query\Builder.
+     *
+     * @param  \Illuminate\Contracts\Database\Query\Expression|string|\Closure|self  $column
+     * @param  mixed  $values
+     * @param  string  $boolean
+     * @param  bool  $not
+     */
+    #[\Override]
+    public function whereIn($column, $values, $boolean = 'and', $not = false)
+    {
+        if ($this->isQueryable($values)) {
+            if ($values instanceof Closure) {
+                $query = $this->forSubQuery();
+                $values($query);
+            } else {
+                $query = ($values instanceof EloquentBuilder || $values instanceof Relation)
+                    ? $values->toBase()
+                    : $values;
+            }
+
+            $this->wheres[] = [
+                'type' => $not ? 'NotInSub' : 'InSub',
+                'column' => $column,
+                'query' => $query,
+                'boolean' => $boolean,
+            ];
+
+            $this->addBinding($query->getBindings(), 'where');
+
+            return $this;
+        }
+
+        return parent::whereIn($column, $values, $boolean, $not);
     }
 
     /**
