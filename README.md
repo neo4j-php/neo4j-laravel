@@ -190,6 +190,27 @@ Laravel's `SoftDeletes` trait works on Neo4j models (`deleted_at` property,
 Pagination APIs (`paginate`, `simplePaginate`, `cursorPaginate`) work via
 Cypher `SKIP` / `LIMIT` and aggregates for totals.
 
+Subquery filters use stock Laravel APIs (`whereIn` / `whereNotIn` with a
+closure, query builder, Eloquent builder, or relation; and `whereExists` /
+`whereNotExists`). They compile to Cypher `COLLECT { }` / `EXISTS { }`:
+
+```php
+User::query()
+    ->whereIn('id', function ($query) {
+        $query->select('user_id')->from('Post');
+    })
+    ->get();
+
+User::query()
+    ->whereIn('id', $user->posts()->select('user_id'))
+    ->get();
+```
+
+Use `DB::connection('neo4j')->table(...)` or Eloquent on a Neo4j model for
+these. Constructing `new Builder($connection, new Neo4jQueryGrammar)` by hand
+still goes through Laravel's compiled Expression path for subquery `whereIn`
+and is not supported — that path throws at compile time.
+
 Foreign-key relations work with stock Eloquent APIs against node properties
 (for example `Profile.user_id` / `Post.user_id` pointing at `User.id`):
 

@@ -393,6 +393,24 @@ final class Neo4jEloquentTest extends TestCase
         self::assertSame('Ada', $matched->first()->name);
     }
 
+    public function testEloquentWhereInAcceptsRelationSubquery(): void
+    {
+        $ada = User::create(['name' => 'Ada']);
+        $alan = User::create(['name' => 'Alan']);
+
+        $ada->posts()->create(['title' => 'First']);
+        $alan->posts()->create(['title' => 'Other']);
+
+        $authors = User::query()
+            ->whereIn('id', $ada->posts()->select('user_id'))
+            ->orderBy('name')
+            ->get();
+
+        self::assertSame(['Ada'], $authors->pluck('name')->all());
+        self::assertSame($ada->id, $authors->first()->id);
+        self::assertFalse($authors->contains(fn (User $user): bool => $user->id === $alan->id));
+    }
+
     public function testEloquentHasManyThroughPosts(): void
     {
         $india = Country::create(['name' => 'India']);
