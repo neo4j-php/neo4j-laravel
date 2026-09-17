@@ -555,6 +555,73 @@ final class Neo4jQueryGrammarTest extends TestCase
         );
     }
 
+    public function testCompilesHavingRelationshipOutgoingDirection(): void
+    {
+        $builder = $this->neo4jBuilder()
+            ->from('Foo')
+            ->havingRelationship('Baz>', 'Bar');
+
+        self::assertSame(
+            'MATCH (n:Foo)-[baz:Baz]->(bar:Bar) RETURN n, baz, bar',
+            $builder->toSql()
+        );
+    }
+
+    public function testCompilesHavingRelationshipIncomingDirection(): void
+    {
+        $builder = $this->neo4jBuilder()
+            ->from('Foo')
+            ->havingRelationship('<Baz', 'Bar');
+
+        self::assertSame(
+            'MATCH (n:Foo)<-[baz:Baz]-(bar:Bar) RETURN n, baz, bar',
+            $builder->toSql()
+        );
+    }
+
+    public function testCompilesHavingRelationshipDirectionFromWhiteboardStyleType(): void
+    {
+        $builder = $this->neo4jBuilder()
+            ->from('Foo')
+            ->havingRelationship(':Baz >', 'Bar');
+
+        self::assertSame(
+            'MATCH (n:Foo)-[baz:Baz]->(bar:Bar) RETURN n, baz, bar',
+            $builder->toSql()
+        );
+    }
+
+    public function testCompilesHavingRelationshipWithRelatedClosureConstraints(): void
+    {
+        $builder = $this->neo4jBuilder()
+            ->from('Foo')
+            ->havingRelationship('Baz>', 'Bar', function ($query): void {
+                $query->where('x', 0)->where('y', 1);
+            });
+
+        self::assertSame(
+            'MATCH (n:Foo)-[baz:Baz]->(bar:Bar) WHERE ((bar.x = $p0) AND (bar.y = $p1)) '
+                .'RETURN n, baz, bar',
+            $builder->toSql()
+        );
+        self::assertSame([0, 1], $builder->getBindings());
+    }
+
+    public function testCompilesHavingRelationshipWithAliasesAndClosure(): void
+    {
+        $builder = $this->neo4jBuilder()
+            ->from('Foo')
+            ->havingRelationship('Baz>', 'Bar', 'edge', 'node', function ($query): void {
+                $query->where('x', 0);
+            });
+
+        self::assertSame(
+            'MATCH (n:Foo)-[edge:Baz]->(node:Bar) WHERE (node.x = $p0) RETURN n, edge, node',
+            $builder->toSql()
+        );
+        self::assertSame([0], $builder->getBindings());
+    }
+
     private function vectorBuilder(): Neo4jQueryBuilder
     {
         return new Neo4jQueryBuilder(

@@ -21,6 +21,7 @@ use WikibaseSolutions\CypherDSL\Types\PropertyTypes\BooleanType;
  *   - join()           -> MATCH (n:Label), (join:JoinLabel) + equality WHERE
  *                        (cartesian-product style; inner/cross only)
  *   - havingRelationship(type, related) -> MATCH (n:Label)-[rel:Type]-(related:Related)
+ *     (direction markers Type> / <Type; optional related-node closure filters)
  *                        (relationship is a first-class Cypher element)
  *   - select(columns)  -> RETURN n.col, ... (including `as` aliases / table.*)
  *   - where (Basic, Null, NotNull, In, NotIn, Between/NotBetween, Nested,
@@ -204,7 +205,8 @@ final class Neo4jQueryGrammar extends Grammar
      *     type: string,
      *     related: string,
      *     relationship: string,
-     *     relatedAlias: string
+     *     relatedAlias: string,
+     *     direction: 'both'|'out'|'in'
      * }>
      */
     private function graphRelationships(Builder $query): array
@@ -327,7 +329,8 @@ final class Neo4jQueryGrammar extends Grammar
      *     type: string,
      *     related: string,
      *     relationship: string,
-     *     relatedAlias: string
+     *     relatedAlias: string,
+     *     direction: 'both'|'out'|'in'
      * }>  $relationships
      */
     private function compileRelationshipMatchPrefix(string $fromLabel, array $relationships): string
@@ -340,14 +343,16 @@ final class Neo4jQueryGrammar extends Grammar
             $this->assertIdentifier($relationship['relatedAlias']);
             $this->assertLabel($relationship['related']);
 
+            $left = $index === 0 ? "(n:{$fromLabel})" : '(n)';
             $rel = "[{$relationship['relationship']}:{$relationship['type']}]";
             $related = "({$relationship['relatedAlias']}:{$relationship['related']})";
+            $direction = $relationship['direction'] ?? 'both';
 
-            if ($index === 0) {
-                $patterns[] = "(n:{$fromLabel})-{$rel}-{$related}";
-            } else {
-                $patterns[] = "(n)-{$rel}-{$related}";
-            }
+            $patterns[] = match ($direction) {
+                'out' => "{$left}-{$rel}->{$related}",
+                'in' => "{$left}<-{$rel}-{$related}",
+                default => "{$left}-{$rel}-{$related}",
+            };
         }
 
         return 'MATCH '.implode(', ', $patterns);
