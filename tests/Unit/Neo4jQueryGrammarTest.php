@@ -379,13 +379,109 @@ final class Neo4jQueryGrammarTest extends TestCase
         );
     }
 
-    public function testRejectsUnsupportedJoinTypes(): void
+    public function testCompilesLeftJoinAsOptionalMatch(): void
+    {
+        $builder = $this->builder()
+            ->from('Role')
+            ->leftJoin('RoleUser', 'Role.id', '=', 'RoleUser.role_id')
+            ->select([
+                'Role.*',
+                'RoleUser.user_id as pivot_user_id',
+                'RoleUser.role_id as pivot_role_id',
+            ]);
+
+        self::assertSame(
+            'MATCH (n:Role) OPTIONAL MATCH (RoleUser:RoleUser) WHERE n.id = RoleUser.role_id '
+                .'RETURN n, RoleUser.user_id AS pivot_user_id, RoleUser.role_id AS pivot_role_id',
+            $builder->toSql()
+        );
+    }
+
+    public function testCompilesLeftJoinWithQueryWhereViaWith(): void
+    {
+        $builder = $this->builder()
+            ->from('Role')
+            ->leftJoin('RoleUser', 'Role.id', '=', 'RoleUser.role_id')
+            ->where('RoleUser.user_id', 'user-1')
+            ->select([
+                'Role.*',
+                'RoleUser.user_id as pivot_user_id',
+            ]);
+
+        self::assertSame(
+            'MATCH (n:Role) OPTIONAL MATCH (RoleUser:RoleUser) WHERE n.id = RoleUser.role_id '
+                .'WITH n, RoleUser WHERE (RoleUser.user_id = $p0) '
+                .'RETURN n, RoleUser.user_id AS pivot_user_id',
+            $builder->toSql()
+        );
+        self::assertSame(['user-1'], $builder->getBindings());
+    }
+
+    public function testCompilesRightJoinAsOptionalMatchOnFromNode(): void
+    {
+        $builder = $this->builder()
+            ->from('Role')
+            ->rightJoin('RoleUser', 'Role.id', '=', 'RoleUser.role_id')
+            ->select([
+                'Role.*',
+                'RoleUser.user_id as pivot_user_id',
+            ]);
+
+        self::assertSame(
+            'MATCH (RoleUser:RoleUser) OPTIONAL MATCH (n:Role) WHERE n.id = RoleUser.role_id '
+                .'RETURN n, RoleUser.user_id AS pivot_user_id',
+            $builder->toSql()
+        );
+    }
+
+    public function testCompilesRightJoinWithQueryWhereViaWith(): void
+    {
+        $builder = $this->builder()
+            ->from('Role')
+            ->rightJoin('RoleUser', 'Role.id', '=', 'RoleUser.role_id')
+            ->where('Role.name', 'Admin')
+            ->select(['Role.*', 'RoleUser.user_id as pivot_user_id']);
+
+        self::assertSame(
+            'MATCH (RoleUser:RoleUser) OPTIONAL MATCH (n:Role) WHERE n.id = RoleUser.role_id '
+                .'WITH n, RoleUser WHERE (n.name = $p0) '
+                .'RETURN n, RoleUser.user_id AS pivot_user_id',
+            $builder->toSql()
+        );
+        self::assertSame(['Admin'], $builder->getBindings());
+    }
+
+    public function testCompilesLeftJoinExists(): void
+    {
+        $exists = $this->builder()
+            ->from('Role')
+            ->leftJoin('RoleUser', 'Role.id', '=', 'RoleUser.role_id');
+
+        self::assertSame(
+            'MATCH (n:Role) OPTIONAL MATCH (RoleUser:RoleUser) WHERE n.id = RoleUser.role_id '
+                .'RETURN true AS exists LIMIT 1',
+            (new Neo4jQueryGrammar())->compileExists($exists)
+        );
+    }
+
+    public function testRejectsMixingLeftAndRightJoins(): void
     {
         $this->expectException(\RuntimeException::class);
 
         $this->builder()
             ->from('Role')
             ->leftJoin('RoleUser', 'Role.id', '=', 'RoleUser.role_id')
+            ->rightJoin('User', 'RoleUser.user_id', '=', 'User.id')
+            ->toSql();
+    }
+
+    public function testRejectsFullOuterJoinType(): void
+    {
+        $this->expectException(\RuntimeException::class);
+
+        $this->builder()
+            ->from('Role')
+            ->join('RoleUser', 'Role.id', '=', 'RoleUser.role_id', 'full outer')
             ->toSql();
     }
 
