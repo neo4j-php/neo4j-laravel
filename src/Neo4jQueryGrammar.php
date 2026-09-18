@@ -21,7 +21,10 @@ use WikibaseSolutions\CypherDSL\Types\PropertyTypes\BooleanType;
  *   - join()           -> MATCH (n:Label), (join:JoinLabel) + equality WHERE
  *                        (cartesian-product style; inner/cross only)
  *   - havingRelationship(type, related) -> MATCH (n:Label)-[rel:Type]-(related:Related)
- *                        (relationship is a first-class Cypher element)
+ *     (single relationship; direction markers Type> / <Type; optional related-node closure)
+ *     Default RETURN is n, rel, related (Query Builder / graph rows; use select('n') for Eloquent)
+ *     With a relationship MATCH, count(*) -> count(n) counts paths (not distinct nodes)
+ *   - insertRelationship() -> MATCH nodes + CREATE directed relationship
  *   - select(columns)  -> RETURN n.col, ... (including `as` aliases / table.*)
  *   - where (Basic, Null, NotNull, In, NotIn, Between/NotBetween, Nested,
  *            Column, raw, Date, Time, Day, Month, Year)
@@ -122,6 +125,10 @@ final class Neo4jQueryGrammar extends Grammar
     private function compileSelectBody(Builder $query): string
     {
         if ($this->hasVectorSimilarity($query)) {
+            if ($this->graphRelationships($query) !== []) {
+                throw new RuntimeException('havingRelationship() cannot be combined with whereVectorSimilarTo().');
+            }
+
             if (! empty($query->unions) || ! empty($query->groups) || ! empty($query->havings) || $query->aggregate !== null) {
                 throw new RuntimeException('Vector similarity queries cannot be combined with union, groupBy, having, or aggregates.');
             }
@@ -209,7 +216,8 @@ final class Neo4jQueryGrammar extends Grammar
      *     type: string,
      *     related: string,
      *     relationship: string,
-     *     relatedAlias: string
+     *     relatedAlias: string,
+     *     direction: 'both'|'out'|'in'
      * }>
      */
     private function graphRelationships(Builder $query): array
@@ -226,6 +234,9 @@ final class Neo4jQueryGrammar extends Grammar
      *
      * havingRelationship() aliases map both the type/label and the Cypher
      * variable so where('bar2.status') and where('Bar2.status') both work.
+     *
+     * Primary from()/alias mappings are never overwritten when the related
+     * label matches the from label — use the related alias for the other node.
      *
      * @return array<string, string>
      */
@@ -267,9 +278,14 @@ final class Neo4jQueryGrammar extends Grammar
             $this->assertIdentifier($relationship['type']);
             $this->assertLabel($relationship['related']);
 
-            $map[$relationship['type']] = $relationship['relationship'];
+            if (! array_key_exists($relationship['type'], $map)) {
+                $map[$relationship['type']] = $relationship['relationship'];
+            }
             $map[$relationship['relationship']] = $relationship['relationship'];
-            $map[$relationship['related']] = $relationship['relatedAlias'];
+
+            if (! array_key_exists($relationship['related'], $map)) {
+                $map[$relationship['related']] = $relationship['relatedAlias'];
+            }
             $map[$relationship['relatedAlias']] = $relationship['relatedAlias'];
         }
 
@@ -335,7 +351,8 @@ final class Neo4jQueryGrammar extends Grammar
      *     type: string,
      *     related: string,
      *     relationship: string,
-     *     relatedAlias: string
+     *     relatedAlias: string,
+     *     direction?: 'both'|'out'|'in'
      * }>  $relationships
      */
     private function compileRelationshipMatchPrefix(string $fromLabel, array $relationships): string
@@ -348,14 +365,16 @@ final class Neo4jQueryGrammar extends Grammar
             $this->assertIdentifier($relationship['relatedAlias']);
             $this->assertLabel($relationship['related']);
 
+            $left = $index === 0 ? "(n:{$fromLabel})" : '(n)';
             $rel = "[{$relationship['relationship']}:{$relationship['type']}]";
             $related = "({$relationship['relatedAlias']}:{$relationship['related']})";
+            $direction = $relationship['direction'] ?? 'both';
 
-            if ($index === 0) {
-                $patterns[] = "(n:{$fromLabel})-{$rel}-{$related}";
-            } else {
-                $patterns[] = "(n)-{$rel}-{$related}";
-            }
+            $patterns[] = match ($direction) {
+                'out' => "{$left}-{$rel}->{$related}",
+                'in' => "{$left}<-{$rel}-{$related}",
+                default => "{$left}-{$rel}-{$related}",
+            };
         }
 
         return 'MATCH '.implode(', ', $patterns);
@@ -1350,6 +1369,49 @@ final class Neo4jQueryGrammar extends Grammar
         }
 
         return 'CREATE '.implode(', ', $nodes);
+    }
+
+    /**
+     * Compile MATCH + CREATE for a directed relationship between two existing nodes.
+     *
+     * @param  array{
+     *     type: string,
+     *     related: string,
+     *     relationship: string,
+     *     relatedAlias: string,
+     *     direction: 'out'|'in',
+     *     fromColumns: list<string>,
+     *     toColumns: list<string>,
+     *     propertyColumns: list<string>
+     * }  $relationship
+     */
+    public function compileInsertRelationship(Builder $query, array $relationship): string
+    {
+        $this->parameterIndex = 0;
+
+        $from = $this->parseTableName($query->from);
+        $this->assertIdentifier($relationship['type']);
+        $this->assertIdentifier($relationship['relationship']);
+        $this->assertIdentifier($relationship['relatedAlias']);
+        $this->assertLabel($relationship['related']);
+
+        $fromNode = "(n:{$from['name']} ".$this->compilePropertyMap($relationship['fromColumns']).')';
+        $relatedNode = "({$relationship['relatedAlias']}:{$relationship['related']} "
+            .$this->compilePropertyMap($relationship['toColumns']).')';
+        $relProps = $relationship['propertyColumns'] === []
+            ? ''
+            : ' '.$this->compilePropertyMap($relationship['propertyColumns']);
+        $rel = "[{$relationship['relationship']}:{$relationship['type']}{$relProps}]";
+
+        $create = match ($relationship['direction']) {
+            'out' => "(n)-{$rel}->({$relationship['relatedAlias']})",
+            'in' => "(n)<-{$rel}-({$relationship['relatedAlias']})",
+            default => throw new InvalidArgumentException(
+                'insertRelationship() requires a directed relationship type.'
+            ),
+        };
+
+        return "MATCH {$fromNode}, {$relatedNode} CREATE {$create}";
     }
 
     /**
