@@ -20,7 +20,7 @@ use WikibaseSolutions\CypherDSL\Types\PropertyTypes\BooleanType;
  *   - from() / table() -> MATCH (n:Label)
  *   - join()           -> MATCH (n:Label), (join:JoinLabel) + equality WHERE
  *                        (cartesian-product style; inner/cross only)
- *   - havingRelationship(type, relatedLabel) -> MATCH (n:Label)-[rel:Type]-(related:Related)
+ *   - matchRelationship(type, relatedLabel) -> MATCH (n:Label)-[rel:Type]-(related:Related)
  *     (single relationship; direction markers Type> / <Type; optional WHERE-only related-node closure)
  *     Default RETURN is n (select rel/related explicitly for graph rows)
  *     With a relationship MATCH, count(*) -> count(n) counts paths (not distinct nodes)
@@ -127,7 +127,7 @@ final class Neo4jQueryGrammar extends Grammar
     {
         if ($this->hasVectorSimilarity($query)) {
             if ($this->graphRelationships($query) !== []) {
-                throw new RuntimeException('havingRelationship() cannot be combined with whereVectorSimilarTo().');
+                throw new RuntimeException('matchRelationship() cannot be combined with whereVectorSimilarTo().');
             }
 
             if (! empty($query->unions) || ! empty($query->groups) || ! empty($query->havings) || $query->aggregate !== null) {
@@ -184,7 +184,7 @@ final class Neo4jQueryGrammar extends Grammar
 
         if (! empty($query->groups) || ! empty($query->havings)) {
             if (! empty($query->joins) || $this->graphRelationships($query) !== []) {
-                throw new RuntimeException('groupBy/having with joins or havingRelationship() is not supported on Neo4j Query Builder yet.');
+                throw new RuntimeException('groupBy/having with joins or matchRelationship() is not supported on Neo4j Query Builder yet.');
             }
 
             return $this->compileGroupedSelect($query, $prefix, $variables);
@@ -229,7 +229,7 @@ final class Neo4jQueryGrammar extends Grammar
      * table name (or explicit alias) as the variable, enabling cartesian joins:
      * MATCH (n:Role), (RoleUser:RoleUser) WHERE n.id = RoleUser.role_id
      *
-     * havingRelationship() aliases map both the type/label and the Cypher
+     * matchRelationship() aliases map both the type/label and the Cypher
      * variable so where('bar2.status') and where('Bar2.status') both work.
      *
      * Primary from()/alias mappings are never overwritten when the related
@@ -318,7 +318,7 @@ final class Neo4jQueryGrammar extends Grammar
         $relationships = $this->graphRelationships($query);
 
         if ($relationships !== [] && ! empty($query->joins)) {
-            throw new RuntimeException('havingRelationship() cannot be combined with join() on Neo4j Query Builder.');
+            throw new RuntimeException('matchRelationship() cannot be combined with join() on Neo4j Query Builder.');
         }
 
         if ($relationships !== []) {
@@ -1415,7 +1415,7 @@ final class Neo4jQueryGrammar extends Grammar
         }
 
         if ($this->graphRelationships($query) !== []) {
-            throw new RuntimeException('Updates with havingRelationship() are not supported on Neo4j Query Builder.');
+            throw new RuntimeException('Updates with matchRelationship() are not supported on Neo4j Query Builder.');
         }
 
         $variables = $this->compileVariableMap($query);
@@ -1457,7 +1457,7 @@ final class Neo4jQueryGrammar extends Grammar
         }
 
         if ($this->graphRelationships($query) !== []) {
-            throw new RuntimeException('Deletes with havingRelationship() are not supported on Neo4j Query Builder.');
+            throw new RuntimeException('Deletes with matchRelationship() are not supported on Neo4j Query Builder.');
         }
 
         $variables = $this->compileVariableMap($query);

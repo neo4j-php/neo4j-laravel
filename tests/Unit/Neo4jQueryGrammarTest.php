@@ -616,11 +616,11 @@ final class Neo4jQueryGrammarTest extends TestCase
         self::assertSame(['admin', 'editor'], $first->getBindings());
     }
 
-    public function testCompilesHavingRelationshipAsGraphPattern(): void
+    public function testCompilesMatchRelationshipAsGraphPattern(): void
     {
         $builder = $this->neo4jBuilder()
             ->from('Bar')
-            ->havingRelationship('Bar2', 'Foo');
+            ->matchRelationship('Bar2', 'Foo');
 
         self::assertSame(
             'MATCH (n:Bar)-[bar2:Bar2]-(foo:Foo) RETURN n',
@@ -628,11 +628,11 @@ final class Neo4jQueryGrammarTest extends TestCase
         );
     }
 
-    public function testCompilesHavingRelationshipWithRelationshipAndRelatedWheres(): void
+    public function testCompilesMatchRelationshipWithRelationshipAndRelatedWheres(): void
     {
         $builder = $this->neo4jBuilder()
             ->from('Bar')
-            ->havingRelationship('Bar2', 'Foo')
+            ->matchRelationship('Bar2', 'Foo')
             ->where('bar2.status', 'active')
             ->where('foo.name', 'Ada');
 
@@ -644,11 +644,11 @@ final class Neo4jQueryGrammarTest extends TestCase
         self::assertSame(['active', 'Ada'], $builder->getBindings());
     }
 
-    public function testCompilesHavingRelationshipQualifiedByTypeAndLabel(): void
+    public function testCompilesMatchRelationshipQualifiedByTypeAndLabel(): void
     {
         $builder = $this->neo4jBuilder()
             ->from('Bar')
-            ->havingRelationship('Bar2', 'Foo')
+            ->matchRelationship('Bar2', 'Foo')
             ->where('Bar2.status', 'active')
             ->where('Foo.name', 'Ada');
 
@@ -659,11 +659,11 @@ final class Neo4jQueryGrammarTest extends TestCase
         );
     }
 
-    public function testCompilesHavingRelationshipWithCustomAliases(): void
+    public function testCompilesMatchRelationshipWithCustomAliases(): void
     {
         $builder = $this->neo4jBuilder()
             ->from('Person')
-            ->havingRelationship('ACTED_IN', 'Movie', 'role', 'film')
+            ->matchRelationship('ACTED_IN', 'Movie', 'role', 'film')
             ->where('role.roles', 'Neo')
             ->select(['n', 'role', 'film']);
 
@@ -675,33 +675,33 @@ final class Neo4jQueryGrammarTest extends TestCase
         self::assertSame(['Neo'], $builder->getBindings());
     }
 
-    public function testRejectsSecondHavingRelationship(): void
+    public function testRejectsSecondMatchRelationship(): void
     {
         $this->expectException(\RuntimeException::class);
-        $this->expectExceptionMessage('Only one havingRelationship() is supported per query');
+        $this->expectExceptionMessage('Only one matchRelationship() is supported per query');
 
         $this->neo4jBuilder()
             ->from('Person')
-            ->havingRelationship('ACTED_IN', 'Movie')
-            ->havingRelationship('DIRECTED', 'Movie', 'directed', 'directedMovie');
+            ->matchRelationship('ACTED_IN', 'Movie')
+            ->matchRelationship('DIRECTED', 'Movie', 'directed', 'directedMovie');
     }
 
-    public function testRejectsHavingRelationshipCombinedWithJoin(): void
+    public function testRejectsMatchRelationshipCombinedWithJoin(): void
     {
         $this->expectException(\RuntimeException::class);
 
         $this->neo4jBuilder()
             ->from('Bar')
-            ->havingRelationship('Bar2', 'Foo')
+            ->matchRelationship('Bar2', 'Foo')
             ->join('RoleUser', 'Bar.id', '=', 'RoleUser.bar_id')
             ->toSql();
     }
 
-    public function testCompilesHavingRelationshipExistsAndAggregate(): void
+    public function testCompilesMatchRelationshipExistsAndAggregate(): void
     {
         $exists = $this->neo4jBuilder()
             ->from('Bar')
-            ->havingRelationship('Bar2', 'Foo')
+            ->matchRelationship('Bar2', 'Foo')
             ->where('bar2.status', 'active');
 
         self::assertSame(
@@ -711,7 +711,7 @@ final class Neo4jQueryGrammarTest extends TestCase
 
         $count = $this->neo4jBuilder()
             ->from('Bar')
-            ->havingRelationship('Bar2', 'Foo')
+            ->matchRelationship('Bar2', 'Foo')
             ->where('foo.name', 'Ada');
         $count->aggregate = ['function' => 'count', 'columns' => ['*']];
 
@@ -722,11 +722,11 @@ final class Neo4jQueryGrammarTest extends TestCase
         );
     }
 
-    public function testCompilesHavingRelationshipOutgoingDirection(): void
+    public function testCompilesMatchRelationshipOutgoingDirection(): void
     {
         $builder = $this->neo4jBuilder()
             ->from('Foo')
-            ->havingRelationship('Baz>', 'Bar');
+            ->matchRelationship('Baz>', 'Bar');
 
         self::assertSame(
             'MATCH (n:Foo)-[baz:Baz]->(bar:Bar) RETURN n',
@@ -734,11 +734,11 @@ final class Neo4jQueryGrammarTest extends TestCase
         );
     }
 
-    public function testCompilesHavingRelationshipIncomingDirection(): void
+    public function testCompilesMatchRelationshipIncomingDirection(): void
     {
         $builder = $this->neo4jBuilder()
             ->from('Foo')
-            ->havingRelationship('<Baz', 'Bar');
+            ->matchRelationship('<Baz', 'Bar');
 
         self::assertSame(
             'MATCH (n:Foo)<-[baz:Baz]-(bar:Bar) RETURN n',
@@ -746,11 +746,11 @@ final class Neo4jQueryGrammarTest extends TestCase
         );
     }
 
-    public function testCompilesHavingRelationshipDirectionFromWhiteboardStyleType(): void
+    public function testCompilesMatchRelationshipDirectionFromWhiteboardStyleType(): void
     {
         $builder = $this->neo4jBuilder()
             ->from('Foo')
-            ->havingRelationship(':Baz >', 'Bar');
+            ->matchRelationship(':Baz >', 'Bar');
 
         self::assertSame(
             'MATCH (n:Foo)-[baz:Baz]->(bar:Bar) RETURN n',
@@ -758,11 +758,11 @@ final class Neo4jQueryGrammarTest extends TestCase
         );
     }
 
-    public function testCompilesHavingRelationshipWithRelatedClosureConstraints(): void
+    public function testCompilesMatchRelationshipWithRelatedClosureConstraints(): void
     {
         $builder = $this->neo4jBuilder()
             ->from('Foo')
-            ->havingRelationship('Baz>', 'Bar', function ($query): void {
+            ->matchRelationship('Baz>', 'Bar', function ($query): void {
                 $query->where('x', 0)->where('y', 1);
             });
 
@@ -774,11 +774,11 @@ final class Neo4jQueryGrammarTest extends TestCase
         self::assertSame([0, 1], $builder->getBindings());
     }
 
-    public function testCompilesHavingRelationshipWithAliasesAndClosure(): void
+    public function testCompilesMatchRelationshipWithAliasesAndClosure(): void
     {
         $builder = $this->neo4jBuilder()
             ->from('Foo')
-            ->havingRelationship('Baz>', 'Bar', 'edge', 'node', function ($query): void {
+            ->matchRelationship('Baz>', 'Bar', 'edge', 'node', function ($query): void {
                 $query->where('x', 0);
             });
 
@@ -789,11 +789,11 @@ final class Neo4jQueryGrammarTest extends TestCase
         self::assertSame([0], $builder->getBindings());
     }
 
-    public function testHavingRelationshipSameLabelKeepsPrimaryVariableMapping(): void
+    public function testMatchRelationshipSameLabelKeepsPrimaryVariableMapping(): void
     {
         $builder = $this->neo4jBuilder()
             ->from('Foo')
-            ->havingRelationship('KNOWS>', 'Foo', 'knows', 'friend')
+            ->matchRelationship('KNOWS>', 'Foo', 'knows', 'friend')
             ->where('Foo.name', 'Ada')
             ->where('friend.name', 'Bob');
 
@@ -861,71 +861,71 @@ final class Neo4jQueryGrammarTest extends TestCase
             ->insertRelationship('ACTED_IN', 'Movie', ['id' => 1], ['id' => 2]);
     }
 
-    public function testRejectsHavingRelationshipCombinedWithUpdate(): void
+    public function testRejectsMatchRelationshipCombinedWithUpdate(): void
     {
         $this->expectException(\RuntimeException::class);
-        $this->expectExceptionMessage('Updates with havingRelationship()');
+        $this->expectExceptionMessage('Updates with matchRelationship()');
 
         $builder = $this->neo4jBuilder()
             ->from('Bar')
-            ->havingRelationship('Bar2', 'Foo')
+            ->matchRelationship('Bar2', 'Foo')
             ->where('id', 1);
 
         (new Neo4jQueryGrammar())->compileUpdate($builder, ['status' => 'x']);
     }
 
-    public function testRejectsHavingRelationshipCombinedWithDelete(): void
+    public function testRejectsMatchRelationshipCombinedWithDelete(): void
     {
         $this->expectException(\RuntimeException::class);
-        $this->expectExceptionMessage('Deletes with havingRelationship()');
+        $this->expectExceptionMessage('Deletes with matchRelationship()');
 
         $builder = $this->neo4jBuilder()
             ->from('Bar')
-            ->havingRelationship('Bar2', 'Foo');
+            ->matchRelationship('Bar2', 'Foo');
 
         (new Neo4jQueryGrammar())->compileDelete($builder);
     }
 
-    public function testRejectsHavingRelationshipCombinedWithVectorSimilarity(): void
+    public function testRejectsMatchRelationshipCombinedWithVectorSimilarity(): void
     {
         $this->expectException(\RuntimeException::class);
-        $this->expectExceptionMessage('havingRelationship() cannot be combined with whereVectorSimilarTo()');
+        $this->expectExceptionMessage('matchRelationship() cannot be combined with whereVectorSimilarTo()');
 
         $this->neo4jBuilder()
             ->from('Movie')
-            ->havingRelationship('SIMILAR_TO>', 'Movie')
+            ->matchRelationship('SIMILAR_TO>', 'Movie')
             ->whereVectorSimilarTo('embedding', [0.1, 0.2], 0.5)
             ->toSql();
     }
 
-    public function testRejectsHavingRelationshipWhenDefaultAliasesCollide(): void
+    public function testRejectsMatchRelationshipWhenDefaultAliasesCollide(): void
     {
         $this->expectException(\InvalidArgumentException::class);
         $this->expectExceptionMessage('aliases collide');
 
         $this->neo4jBuilder()
             ->from('Person')
-            ->havingRelationship('FRIEND', 'Friend');
+            ->matchRelationship('FRIEND', 'Friend');
     }
 
-    public function testRejectsHavingRelationshipWhenAliasIsReservedN(): void
+    public function testRejectsMatchRelationshipWhenAliasIsReservedN(): void
     {
         $this->expectException(\InvalidArgumentException::class);
         $this->expectExceptionMessage('cannot be "n"');
 
         $this->neo4jBuilder()
             ->from('Person')
-            ->havingRelationship('KNOWS>', 'Person', 'knows', 'n');
+            ->matchRelationship('KNOWS>', 'Person', 'knows', 'n');
     }
 
-    public function testRejectsHavingRelationshipClosureWithNonWhereClauses(): void
+    public function testRejectsMatchRelationshipClosureWithNonWhereClauses(): void
     {
         $this->expectException(\InvalidArgumentException::class);
         $this->expectExceptionMessage('may only add WHERE constraints');
 
         $this->neo4jBuilder()
             ->from('Foo')
-            ->havingRelationship('Baz>', 'Bar', function ($query): void {
+            ->matchRelationship('Baz>', 'Bar', function ($query): void {
                 $query->where('x', 0)->orderBy('x');
             });
     }
@@ -940,14 +940,14 @@ final class Neo4jQueryGrammarTest extends TestCase
             ->insertRelationship('ACTED_IN>', 'Movie', [], ['id' => 2]);
     }
 
-    public function testRejectsInsertRelationshipCombinedWithHavingRelationship(): void
+    public function testRejectsInsertRelationshipCombinedWithMatchRelationship(): void
     {
         $this->expectException(\RuntimeException::class);
-        $this->expectExceptionMessage('cannot be combined with havingRelationship()');
+        $this->expectExceptionMessage('cannot be combined with matchRelationship()');
 
         $this->neo4jBuilder()
             ->from('Person')
-            ->havingRelationship('ACTED_IN>', 'Movie')
+            ->matchRelationship('ACTED_IN>', 'Movie')
             ->insertRelationship('ACTED_IN>', 'Movie', ['id' => 1], ['id' => 2]);
     }
 

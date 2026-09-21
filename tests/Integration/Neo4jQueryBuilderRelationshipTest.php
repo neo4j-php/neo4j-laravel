@@ -50,7 +50,7 @@ final class Neo4jQueryBuilderRelationshipTest extends TestCase
 
         // Neo4jProcessor flattens RETURN n into row attributes (not a nested Node).
         $people = $connection->table('QbPerson')
-            ->havingRelationship('ACTED_IN>', 'QbMovie', 'role', 'film', function ($query): void {
+            ->matchRelationship('ACTED_IN>', 'QbMovie', 'role', 'film', function ($query): void {
                 $query->where('title', 'The Matrix');
             })
             ->get();
@@ -60,7 +60,7 @@ final class Neo4jQueryBuilderRelationshipTest extends TestCase
         self::assertSame('person-1', $people[0]['id']);
 
         $graphRows = $connection->table('QbPerson')
-            ->havingRelationship('ACTED_IN>', 'QbMovie', 'role', 'film')
+            ->matchRelationship('ACTED_IN>', 'QbMovie', 'role', 'film')
             ->where('film.title', 'The Matrix')
             ->select(['n', 'role', 'film'])
             ->get();

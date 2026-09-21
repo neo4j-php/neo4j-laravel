@@ -66,11 +66,11 @@ final class Neo4jQueryBuilder extends Builder
      * variables explicitly when you need graph rows, e.g. select('n', 'role', 'film').
      *
      * Examples:
-     *   ->havingRelationship('Bar2', 'Foo')
-     *   ->havingRelationship('Baz>', 'Bar', fn ($q) => $q->where('x', 0))
-     *   ->havingRelationship('ACTED_IN', 'Movie', 'role', 'film')
+     *   ->matchRelationship('Bar2', 'Foo')
+     *   ->matchRelationship('Baz>', 'Bar', fn ($q) => $q->where('x', 0))
+     *   ->matchRelationship('ACTED_IN', 'Movie', 'role', 'film')
      */
-    public function havingRelationship(
+    public function matchRelationship(
         string $relationshipType,
         string $relatedNodeLabel,
         Closure|string|null $relationshipAlias = null,
@@ -79,11 +79,11 @@ final class Neo4jQueryBuilder extends Builder
     ): static {
         if ($this->graphRelationships !== []) {
             throw new RuntimeException(
-                'Only one havingRelationship() is supported per query; multiple relationships will come in a later release.'
+                'Only one matchRelationship() is supported per query; multiple relationships will come in a later release.'
             );
         }
 
-        [$relationshipAlias, $relatedNodeAlias, $constraints] = $this->normalizeHavingRelationshipArgs(
+        [$relationshipAlias, $relatedNodeAlias, $constraints] = $this->normalizeMatchRelationshipArgs(
             $relationshipAlias,
             $relatedNodeAlias,
             $constraints
@@ -144,7 +144,7 @@ final class Neo4jQueryBuilder extends Builder
     ): bool {
         if ($this->graphRelationships !== []) {
             throw new RuntimeException(
-                'insertRelationship() cannot be combined with havingRelationship().'
+                'insertRelationship() cannot be combined with matchRelationship().'
             );
         }
 
@@ -276,7 +276,7 @@ final class Neo4jQueryBuilder extends Builder
     /**
      * @return array{0: ?string, 1: ?string, 2: ?Closure}
      */
-    private function normalizeHavingRelationshipArgs(
+    private function normalizeMatchRelationshipArgs(
         Closure|string|null $relationshipAlias,
         Closure|string|null $relatedNodeAlias,
         ?Closure $constraints
@@ -284,7 +284,7 @@ final class Neo4jQueryBuilder extends Builder
         if ($relationshipAlias instanceof Closure) {
             if ($relatedNodeAlias !== null || $constraints !== null) {
                 throw new InvalidArgumentException(
-                    'havingRelationship() closure must be the last argument.'
+                    'matchRelationship() closure must be the last argument.'
                 );
             }
 
@@ -294,7 +294,7 @@ final class Neo4jQueryBuilder extends Builder
         if ($relatedNodeAlias instanceof Closure) {
             if ($constraints !== null) {
                 throw new InvalidArgumentException(
-                    'havingRelationship() closure must be the last argument.'
+                    'matchRelationship() closure must be the last argument.'
                 );
             }
 
@@ -345,7 +345,7 @@ final class Neo4jQueryBuilder extends Builder
     {
         if ($relationshipAlias === 'n' || $relatedNodeAlias === 'n') {
             throw new InvalidArgumentException(
-                'havingRelationship()/insertRelationship() aliases cannot be "n" (reserved for the from() node).'
+                'matchRelationship()/insertRelationship() aliases cannot be "n" (reserved for the from() node).'
             );
         }
 
@@ -387,7 +387,7 @@ final class Neo4jQueryBuilder extends Builder
             || $query->offset !== null
         ) {
             throw new InvalidArgumentException(
-                'havingRelationship() closure may only add WHERE constraints on the related node.'
+                'matchRelationship() closure may only add WHERE constraints on the related node.'
             );
         }
     }
