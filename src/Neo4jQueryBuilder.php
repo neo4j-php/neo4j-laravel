@@ -47,17 +47,23 @@ final class Neo4jQueryBuilder extends Builder
      *
      * Only one relationship per query is supported (call this once).
      *
-     * Direction can be encoded on the type:
+     * Direction can be encoded on the type string (no marker means undirected):
      *   'Bar2' / ':Bar2'   -> (n)-[r:Bar2]-(related)   undirected
      *   'Bar2>' / '>Bar2'  -> (n)-[r:Bar2]->(related)  outgoing
      *   '<Bar2' / 'Bar2<'  -> (n)<-[r:Bar2]-(related)  incoming
+     *   '<Bar2>'           -> (n)-[r:Bar2]-(related)   undirected (explicit)
      *
      * Optional 3rd/4th string args are relationship and related-node aliases.
-     * A Closure (as 3rd, 4th, or 5th arg) adds related-node WHERE constraints;
-     * unqualified columns inside the closure are scoped to the related alias.
+     * Aliases default from the type/label (lcfirst / lower for SCREAMING_SNAKE)
+     * and must be distinct from each other and from `n`.
      *
-     * Default RETURN is `n, rel, related` (Query Builder / graph rows). For
-     * Eloquent hydration prefer `select('n')` (or node property columns only).
+     * A Closure (as 3rd, 4th, or 5th arg) may only add WHERE constraints on the
+     * related node; unqualified columns inside the closure are scoped to the
+     * related alias. Filter relationship properties with outer where() using
+     * the relationship alias (e.g. where('role.roles', ...)).
+     *
+     * Default RETURN is `n` (safe for Eloquent). Select relationship / related
+     * variables explicitly when you need graph rows, e.g. select('n', 'role', 'film').
      *
      * Examples:
      *   ->havingRelationship('Bar2', 'Foo')
@@ -65,10 +71,10 @@ final class Neo4jQueryBuilder extends Builder
      *   ->havingRelationship('ACTED_IN', 'Movie', 'role', 'film')
      */
     public function havingRelationship(
-        string $type,
-        string $related,
+        string $relationshipType,
+        string $relatedNodeLabel,
         Closure|string|null $relationshipAlias = null,
-        Closure|string|null $relatedAlias = null,
+        Closure|string|null $relatedNodeAlias = null,
         ?Closure $constraints = null
     ): static {
         if ($this->graphRelationships !== []) {
@@ -77,20 +83,22 @@ final class Neo4jQueryBuilder extends Builder
             );
         }
 
-        [$relationshipAlias, $relatedAlias, $constraints] = $this->normalizeHavingRelationshipArgs(
+        [$relationshipAlias, $relatedNodeAlias, $constraints] = $this->normalizeHavingRelationshipArgs(
             $relationshipAlias,
-            $relatedAlias,
+            $relatedNodeAlias,
             $constraints
         );
 
-        $parsed = $this->parseRelationshipType($type);
+        $parsed = $this->parseRelationshipType($relationshipType);
 
         $relationshipVariable = $relationshipAlias ?? $this->defaultGraphAlias($parsed['type']);
-        $relatedVariable = $relatedAlias ?? $this->defaultGraphAlias($related);
+        $relatedVariable = $relatedNodeAlias ?? $this->defaultGraphAlias($relatedNodeLabel);
+
+        $this->assertDistinctGraphAliases($relationshipVariable, $relatedVariable);
 
         $this->graphRelationships[] = [
             'type' => $parsed['type'],
-            'related' => $related,
+            'related' => $relatedNodeLabel,
             'relationship' => $relationshipVariable,
             'relatedAlias' => $relatedVariable,
             'direction' => $parsed['direction'],
@@ -107,7 +115,10 @@ final class Neo4jQueryBuilder extends Builder
      * Create a directed relationship between two existing nodes.
      *
      * The type must include a direction marker (e.g. `ACTED_IN>` or `<ACTED_IN`).
-     * Nodes are matched by property maps; optional relationship properties are set on CREATE.
+     * Nodes are matched only by the given property maps — any where()/orderBy()
+     * already on this builder is ignored. Optional relationship properties are
+     * set on CREATE (not MERGE); calling this twice with the same keys creates
+     * duplicate relationships.
      *
      * Example:
      *   DB::table('Person')->insertRelationship(
@@ -123,13 +134,13 @@ final class Neo4jQueryBuilder extends Builder
      * @param  array<string, mixed>  $properties
      */
     public function insertRelationship(
-        string $type,
-        string $related,
+        string $relationshipType,
+        string $relatedNodeLabel,
         array $fromKey,
         array $toKey,
         array $properties = [],
         ?string $relationshipAlias = null,
-        ?string $relatedAlias = null
+        ?string $relatedNodeAlias = null
     ): bool {
         if ($this->graphRelationships !== []) {
             throw new RuntimeException(
@@ -143,7 +154,7 @@ final class Neo4jQueryBuilder extends Builder
             );
         }
 
-        $parsed = $this->parseRelationshipType($type);
+        $parsed = $this->parseRelationshipType($relationshipType);
 
         if ($parsed['direction'] === 'both') {
             throw new InvalidArgumentException(
@@ -151,11 +162,16 @@ final class Neo4jQueryBuilder extends Builder
             );
         }
 
+        $relationshipVariable = $relationshipAlias ?? $this->defaultGraphAlias($parsed['type']);
+        $relatedVariable = $relatedNodeAlias ?? $this->defaultGraphAlias($relatedNodeLabel);
+
+        $this->assertDistinctGraphAliases($relationshipVariable, $relatedVariable);
+
         $relationship = [
             'type' => $parsed['type'],
-            'related' => $related,
-            'relationship' => $relationshipAlias ?? $this->defaultGraphAlias($parsed['type']),
-            'relatedAlias' => $relatedAlias ?? $this->defaultGraphAlias($related),
+            'related' => $relatedNodeLabel,
+            'relationship' => $relationshipVariable,
+            'relatedAlias' => $relatedVariable,
             'direction' => $parsed['direction'],
             'fromColumns' => array_keys($fromKey),
             'toColumns' => array_keys($toKey),
@@ -262,11 +278,11 @@ final class Neo4jQueryBuilder extends Builder
      */
     private function normalizeHavingRelationshipArgs(
         Closure|string|null $relationshipAlias,
-        Closure|string|null $relatedAlias,
+        Closure|string|null $relatedNodeAlias,
         ?Closure $constraints
     ): array {
         if ($relationshipAlias instanceof Closure) {
-            if ($relatedAlias !== null || $constraints !== null) {
+            if ($relatedNodeAlias !== null || $constraints !== null) {
                 throw new InvalidArgumentException(
                     'havingRelationship() closure must be the last argument.'
                 );
@@ -275,29 +291,29 @@ final class Neo4jQueryBuilder extends Builder
             return [null, null, $relationshipAlias];
         }
 
-        if ($relatedAlias instanceof Closure) {
+        if ($relatedNodeAlias instanceof Closure) {
             if ($constraints !== null) {
                 throw new InvalidArgumentException(
                     'havingRelationship() closure must be the last argument.'
                 );
             }
 
-            return [$relationshipAlias, null, $relatedAlias];
+            return [$relationshipAlias, null, $relatedNodeAlias];
         }
 
-        return [$relationshipAlias, $relatedAlias, $constraints];
+        return [$relationshipAlias, $relatedNodeAlias, $constraints];
     }
 
     /**
      * @return array{type: string, direction: 'both'|'out'|'in'}
      */
-    private function parseRelationshipType(string $type): array
+    private function parseRelationshipType(string $relationshipType): array
     {
-        $normalized = preg_replace('/\s+/', '', trim($type)) ?? trim($type);
+        $normalized = preg_replace('/\s+/', '', trim($relationshipType)) ?? trim($relationshipType);
         $normalized = ltrim($normalized, ':');
 
         if ($normalized === '' || $normalized === '<' || $normalized === '>' || $normalized === '<>') {
-            throw new InvalidArgumentException("Invalid Neo4j relationship type: {$type}");
+            throw new InvalidArgumentException("Invalid Neo4j relationship type: {$relationshipType}");
         }
 
         if (str_starts_with($normalized, '<') && str_ends_with($normalized, '>')) {
@@ -325,16 +341,55 @@ final class Neo4jQueryBuilder extends Builder
         return ['type' => $normalized, 'direction' => 'both'];
     }
 
+    private function assertDistinctGraphAliases(string $relationshipAlias, string $relatedNodeAlias): void
+    {
+        if ($relationshipAlias === 'n' || $relatedNodeAlias === 'n') {
+            throw new InvalidArgumentException(
+                'havingRelationship()/insertRelationship() aliases cannot be "n" (reserved for the from() node).'
+            );
+        }
+
+        if ($relationshipAlias === $relatedNodeAlias) {
+            throw new InvalidArgumentException(
+                "Relationship and related-node aliases collide ({$relationshipAlias}); pass distinct aliases."
+            );
+        }
+    }
+
     private function applyRelatedConstraints(Closure $constraints, string $relatedAlias): void
     {
         $query = $this->forSubQuery();
         $constraints($query);
+
+        $this->assertRelatedConstraintsAreWhereOnly($query);
 
         foreach ($query->wheres ?? [] as $where) {
             $this->wheres[] = $this->qualifyRelatedWhere($where, $relatedAlias);
         }
 
         $this->addBinding($query->getRawBindings()['where'] ?? [], 'where');
+    }
+
+    private function assertRelatedConstraintsAreWhereOnly(Builder $query): void
+    {
+        $hasGraphRelationships = $query instanceof self && $query->graphRelationships !== [];
+
+        if (
+            $hasGraphRelationships
+            || ! empty($query->joins)
+            || ! empty($query->orders)
+            || ! empty($query->groups)
+            || ! empty($query->havings)
+            || ! empty($query->columns)
+            || ! empty($query->unions)
+            || $query->aggregate !== null
+            || $query->limit !== null
+            || $query->offset !== null
+        ) {
+            throw new InvalidArgumentException(
+                'havingRelationship() closure may only add WHERE constraints on the related node.'
+            );
+        }
     }
 
     /**

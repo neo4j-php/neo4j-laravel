@@ -20,11 +20,12 @@ use WikibaseSolutions\CypherDSL\Types\PropertyTypes\BooleanType;
  *   - from() / table() -> MATCH (n:Label)
  *   - join()           -> MATCH (n:Label), (join:JoinLabel) + equality WHERE
  *                        (cartesian-product style; inner/cross only)
- *   - havingRelationship(type, related) -> MATCH (n:Label)-[rel:Type]-(related:Related)
- *     (single relationship; direction markers Type> / <Type; optional related-node closure)
- *     Default RETURN is n, rel, related (Query Builder / graph rows; use select('n') for Eloquent)
+ *   - havingRelationship(type, relatedLabel) -> MATCH (n:Label)-[rel:Type]-(related:Related)
+ *     (single relationship; direction markers Type> / <Type; optional WHERE-only related-node closure)
+ *     Default RETURN is n (select rel/related explicitly for graph rows)
  *     With a relationship MATCH, count(*) -> count(n) counts paths (not distinct nodes)
- *   - insertRelationship() -> MATCH nodes + CREATE directed relationship
+ *   - insertRelationship() -> MATCH nodes by property maps + CREATE directed relationship
+ *     (CREATE not MERGE; builder where() is ignored)
  *   - select(columns)  -> RETURN n.col, ... (including `as` aliases / table.*)
  *   - where (Basic, Null, NotNull, In, NotIn, Between/NotBetween, Nested,
  *            Column, raw, Date, Time, Day, Month, Year)
@@ -167,10 +168,6 @@ final class Neo4jQueryGrammar extends Grammar
     {
         if (! empty($query->joins) && $this->hasVectorSimilarity($query)) {
             throw new RuntimeException('Joins cannot be combined with whereVectorSimilarTo().');
-        }
-
-        if ($this->graphRelationships($query) !== [] && $this->hasVectorSimilarity($query)) {
-            throw new RuntimeException('havingRelationship() cannot be combined with whereVectorSimilarTo().');
         }
 
         $variables = $this->compileVariableMap($query);
@@ -325,7 +322,7 @@ final class Neo4jQueryGrammar extends Grammar
         }
 
         if ($relationships !== []) {
-            return $this->compileRelationshipMatchPrefix($from['name'], $relationships);
+            return $this->compileRelationshipMatchPrefix($from['name'], $relationships[0]);
         }
 
         $patterns = ['(n:'.$from['name'].')'];
@@ -347,37 +344,33 @@ final class Neo4jQueryGrammar extends Grammar
     }
 
     /**
-     * @param  list<array{
+     * @param  array{
      *     type: string,
      *     related: string,
      *     relationship: string,
      *     relatedAlias: string,
      *     direction?: 'both'|'out'|'in'
-     * }>  $relationships
+     * }  $relationship
      */
-    private function compileRelationshipMatchPrefix(string $fromLabel, array $relationships): string
+    private function compileRelationshipMatchPrefix(string $fromLabel, array $relationship): string
     {
-        $patterns = [];
+        $this->assertIdentifier($relationship['type']);
+        $this->assertIdentifier($relationship['relationship']);
+        $this->assertIdentifier($relationship['relatedAlias']);
+        $this->assertLabel($relationship['related']);
 
-        foreach ($relationships as $index => $relationship) {
-            $this->assertIdentifier($relationship['type']);
-            $this->assertIdentifier($relationship['relationship']);
-            $this->assertIdentifier($relationship['relatedAlias']);
-            $this->assertLabel($relationship['related']);
+        $left = "(n:{$fromLabel})";
+        $rel = "[{$relationship['relationship']}:{$relationship['type']}]";
+        $related = "({$relationship['relatedAlias']}:{$relationship['related']})";
+        $direction = $relationship['direction'] ?? 'both';
 
-            $left = $index === 0 ? "(n:{$fromLabel})" : '(n)';
-            $rel = "[{$relationship['relationship']}:{$relationship['type']}]";
-            $related = "({$relationship['relatedAlias']}:{$relationship['related']})";
-            $direction = $relationship['direction'] ?? 'both';
+        $pattern = match ($direction) {
+            'out' => "{$left}-{$rel}->{$related}",
+            'in' => "{$left}<-{$rel}-{$related}",
+            default => "{$left}-{$rel}-{$related}",
+        };
 
-            $patterns[] = match ($direction) {
-                'out' => "{$left}-{$rel}->{$related}",
-                'in' => "{$left}<-{$rel}-{$related}",
-                default => "{$left}-{$rel}-{$related}",
-            };
-        }
-
-        return 'MATCH '.implode(', ', $patterns);
+        return 'MATCH '.$pattern;
     }
 
     /**
@@ -694,14 +687,7 @@ final class Neo4jQueryGrammar extends Grammar
 
     private function compileDefaultReturn(Builder $query): string
     {
-        $parts = ['n'];
-
-        foreach ($this->graphRelationships($query) as $relationship) {
-            $parts[] = $relationship['relationship'];
-            $parts[] = $relationship['relatedAlias'];
-        }
-
-        return implode(', ', $parts);
+        return 'n';
     }
 
     /**

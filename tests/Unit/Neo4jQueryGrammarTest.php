@@ -623,7 +623,7 @@ final class Neo4jQueryGrammarTest extends TestCase
             ->havingRelationship('Bar2', 'Foo');
 
         self::assertSame(
-            'MATCH (n:Bar)-[bar2:Bar2]-(foo:Foo) RETURN n, bar2, foo',
+            'MATCH (n:Bar)-[bar2:Bar2]-(foo:Foo) RETURN n',
             $builder->toSql()
         );
     }
@@ -638,7 +638,7 @@ final class Neo4jQueryGrammarTest extends TestCase
 
         self::assertSame(
             'MATCH (n:Bar)-[bar2:Bar2]-(foo:Foo) WHERE ((bar2.status = $p0) AND (foo.name = $p1)) '
-                .'RETURN n, bar2, foo',
+                .'RETURN n',
             $builder->toSql()
         );
         self::assertSame(['active', 'Ada'], $builder->getBindings());
@@ -654,7 +654,7 @@ final class Neo4jQueryGrammarTest extends TestCase
 
         self::assertSame(
             'MATCH (n:Bar)-[bar2:Bar2]-(foo:Foo) WHERE ((bar2.status = $p0) AND (foo.name = $p1)) '
-                .'RETURN n, bar2, foo',
+                .'RETURN n',
             $builder->toSql()
         );
     }
@@ -729,7 +729,7 @@ final class Neo4jQueryGrammarTest extends TestCase
             ->havingRelationship('Baz>', 'Bar');
 
         self::assertSame(
-            'MATCH (n:Foo)-[baz:Baz]->(bar:Bar) RETURN n, baz, bar',
+            'MATCH (n:Foo)-[baz:Baz]->(bar:Bar) RETURN n',
             $builder->toSql()
         );
     }
@@ -741,7 +741,7 @@ final class Neo4jQueryGrammarTest extends TestCase
             ->havingRelationship('<Baz', 'Bar');
 
         self::assertSame(
-            'MATCH (n:Foo)<-[baz:Baz]-(bar:Bar) RETURN n, baz, bar',
+            'MATCH (n:Foo)<-[baz:Baz]-(bar:Bar) RETURN n',
             $builder->toSql()
         );
     }
@@ -753,7 +753,7 @@ final class Neo4jQueryGrammarTest extends TestCase
             ->havingRelationship(':Baz >', 'Bar');
 
         self::assertSame(
-            'MATCH (n:Foo)-[baz:Baz]->(bar:Bar) RETURN n, baz, bar',
+            'MATCH (n:Foo)-[baz:Baz]->(bar:Bar) RETURN n',
             $builder->toSql()
         );
     }
@@ -768,7 +768,7 @@ final class Neo4jQueryGrammarTest extends TestCase
 
         self::assertSame(
             'MATCH (n:Foo)-[baz:Baz]->(bar:Bar) WHERE ((bar.x = $p0) AND (bar.y = $p1)) '
-                .'RETURN n, baz, bar',
+                .'RETURN n',
             $builder->toSql()
         );
         self::assertSame([0, 1], $builder->getBindings());
@@ -783,7 +783,7 @@ final class Neo4jQueryGrammarTest extends TestCase
             });
 
         self::assertSame(
-            'MATCH (n:Foo)-[edge:Baz]->(node:Bar) WHERE (node.x = $p0) RETURN n, edge, node',
+            'MATCH (n:Foo)-[edge:Baz]->(node:Bar) WHERE (node.x = $p0) RETURN n',
             $builder->toSql()
         );
         self::assertSame([0], $builder->getBindings());
@@ -799,7 +799,7 @@ final class Neo4jQueryGrammarTest extends TestCase
 
         self::assertSame(
             'MATCH (n:Foo)-[knows:KNOWS]->(friend:Foo) WHERE ((n.name = $p0) AND (friend.name = $p1)) '
-                .'RETURN n, knows, friend',
+                .'RETURN n',
             $builder->toSql()
         );
         self::assertSame(['Ada', 'Bob'], $builder->getBindings());
@@ -898,6 +898,69 @@ final class Neo4jQueryGrammarTest extends TestCase
             ->toSql();
     }
 
+    public function testRejectsHavingRelationshipWhenDefaultAliasesCollide(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('aliases collide');
+
+        $this->neo4jBuilder()
+            ->from('Person')
+            ->havingRelationship('FRIEND', 'Friend');
+    }
+
+    public function testRejectsHavingRelationshipWhenAliasIsReservedN(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('cannot be "n"');
+
+        $this->neo4jBuilder()
+            ->from('Person')
+            ->havingRelationship('KNOWS>', 'Person', 'knows', 'n');
+    }
+
+    public function testRejectsHavingRelationshipClosureWithNonWhereClauses(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('may only add WHERE constraints');
+
+        $this->neo4jBuilder()
+            ->from('Foo')
+            ->havingRelationship('Baz>', 'Bar', function ($query): void {
+                $query->where('x', 0)->orderBy('x');
+            });
+    }
+
+    public function testInsertRelationshipRequiresNonEmptyKeys(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('non-empty from and to property maps');
+
+        $this->neo4jBuilder()
+            ->from('Person')
+            ->insertRelationship('ACTED_IN>', 'Movie', [], ['id' => 2]);
+    }
+
+    public function testRejectsInsertRelationshipCombinedWithHavingRelationship(): void
+    {
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('cannot be combined with havingRelationship()');
+
+        $this->neo4jBuilder()
+            ->from('Person')
+            ->havingRelationship('ACTED_IN>', 'Movie')
+            ->insertRelationship('ACTED_IN>', 'Movie', ['id' => 1], ['id' => 2]);
+    }
+
+    public function testRejectsInsertRelationshipWhenDefaultAliasesCollide(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('aliases collide');
+
+        $this->neo4jBuilder()
+            ->from('Person')
+            ->insertRelationship('FRIEND>', 'Friend', ['id' => 1], ['id' => 2]);
+    }
+
     private function vectorBuilder(): Neo4jQueryBuilder
     {
         return new Neo4jQueryBuilder(
@@ -908,7 +971,7 @@ final class Neo4jQueryGrammarTest extends TestCase
     }
 
     private function neo4jBuilder(): Neo4jQueryBuilder
-    {
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        {
         return new Neo4jQueryBuilder(
             $this->createMock(ConnectionInterface::class),
             new Neo4jQueryGrammar(),
