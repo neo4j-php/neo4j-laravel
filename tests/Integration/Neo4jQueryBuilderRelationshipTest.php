@@ -3,7 +3,6 @@
 namespace Neo4j\Neo4jLaravel\Tests\Integration;
 
 use Illuminate\Support\Facades\DB;
-use Laudis\Neo4j\Types\Node;
 use Neo4j\Neo4jLaravel\Tests\TestCase;
 
 final class Neo4jQueryBuilderRelationshipTest extends TestCase
@@ -49,6 +48,7 @@ final class Neo4jQueryBuilderRelationshipTest extends TestCase
             )
         );
 
+        // Neo4jProcessor flattens RETURN n into row attributes (not a nested Node).
         $people = $connection->table('QbPerson')
             ->havingRelationship('ACTED_IN>', 'QbMovie', 'role', 'film', function ($query): void {
                 $query->where('title', 'The Matrix');
@@ -56,8 +56,8 @@ final class Neo4jQueryBuilderRelationshipTest extends TestCase
             ->get();
 
         self::assertCount(1, $people);
-        self::assertInstanceOf(Node::class, $people[0]->n);
-        self::assertSame('Keanu', $people[0]->n->getProperty('name'));
+        self::assertSame('Keanu', $people[0]['name']);
+        self::assertSame('person-1', $people[0]['id']);
 
         $graphRows = $connection->table('QbPerson')
             ->havingRelationship('ACTED_IN>', 'QbMovie', 'role', 'film')
@@ -66,9 +66,13 @@ final class Neo4jQueryBuilderRelationshipTest extends TestCase
             ->get();
 
         self::assertCount(1, $graphRows);
-        self::assertInstanceOf(Node::class, $graphRows[0]->n);
-        self::assertInstanceOf(Node::class, $graphRows[0]->film);
-        self::assertSame('The Matrix', $graphRows[0]->film->getProperty('title'));
-        self::assertSame(['Neo'], $graphRows[0]->role->getProperty('roles')->toArray());
+        self::assertSame('Keanu', $graphRows[0]['name']);
+        self::assertSame('The Matrix', $graphRows[0]['film.title']);
+
+        $roles = $graphRows[0]['role.roles'];
+        self::assertSame(
+            ['Neo'],
+            is_array($roles) ? $roles : $roles->toArray()
+        );
     }
 }
