@@ -616,6 +616,351 @@ final class Neo4jQueryGrammarTest extends TestCase
         self::assertSame(['admin', 'editor'], $first->getBindings());
     }
 
+    public function testCompilesMatchRelationshipAsGraphPattern(): void
+    {
+        $builder = $this->neo4jBuilder()
+            ->from('Bar')
+            ->matchRelationship('Bar2', 'Foo');
+
+        self::assertSame(
+            'MATCH (n:Bar)-[bar2:Bar2]-(foo:Foo) RETURN n',
+            $builder->toSql()
+        );
+    }
+
+    public function testCompilesMatchRelationshipWithRelationshipAndRelatedWheres(): void
+    {
+        $builder = $this->neo4jBuilder()
+            ->from('Bar')
+            ->matchRelationship('Bar2', 'Foo')
+            ->where('bar2.status', 'active')
+            ->where('foo.name', 'Ada');
+
+        self::assertSame(
+            'MATCH (n:Bar)-[bar2:Bar2]-(foo:Foo) WHERE ((bar2.status = $p0) AND (foo.name = $p1)) '
+                .'RETURN n',
+            $builder->toSql()
+        );
+        self::assertSame(['active', 'Ada'], $builder->getBindings());
+    }
+
+    public function testCompilesMatchRelationshipQualifiedByTypeAndLabel(): void
+    {
+        $builder = $this->neo4jBuilder()
+            ->from('Bar')
+            ->matchRelationship('Bar2', 'Foo')
+            ->where('Bar2.status', 'active')
+            ->where('Foo.name', 'Ada');
+
+        self::assertSame(
+            'MATCH (n:Bar)-[bar2:Bar2]-(foo:Foo) WHERE ((bar2.status = $p0) AND (foo.name = $p1)) '
+                .'RETURN n',
+            $builder->toSql()
+        );
+    }
+
+    public function testCompilesMatchRelationshipWithCustomAliases(): void
+    {
+        $builder = $this->neo4jBuilder()
+            ->from('Person')
+            ->matchRelationship('ACTED_IN', 'Movie', 'role', 'film')
+            ->where('role.roles', 'Neo')
+            ->select(['n', 'role', 'film']);
+
+        self::assertSame(
+            'MATCH (n:Person)-[role:ACTED_IN]-(film:Movie) WHERE (role.roles = $p0) '
+                .'RETURN n, role, film',
+            $builder->toSql()
+        );
+        self::assertSame(['Neo'], $builder->getBindings());
+    }
+
+    public function testRejectsSecondMatchRelationship(): void
+    {
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('Only one matchRelationship() is supported per query');
+
+        $this->neo4jBuilder()
+            ->from('Person')
+            ->matchRelationship('ACTED_IN', 'Movie')
+            ->matchRelationship('DIRECTED', 'Movie', 'directed', 'directedMovie');
+    }
+
+    public function testRejectsMatchRelationshipCombinedWithJoin(): void
+    {
+        $this->expectException(\RuntimeException::class);
+
+        $this->neo4jBuilder()
+            ->from('Bar')
+            ->matchRelationship('Bar2', 'Foo')
+            ->join('RoleUser', 'Bar.id', '=', 'RoleUser.bar_id')
+            ->toSql();
+    }
+
+    public function testCompilesMatchRelationshipExistsAndAggregate(): void
+    {
+        $exists = $this->neo4jBuilder()
+            ->from('Bar')
+            ->matchRelationship('Bar2', 'Foo')
+            ->where('bar2.status', 'active');
+
+        self::assertSame(
+            'MATCH (n:Bar)-[bar2:Bar2]-(foo:Foo) WHERE (bar2.status = $p0) RETURN true AS exists LIMIT 1',
+            (new Neo4jQueryGrammar())->compileExists($exists)
+        );
+
+        $count = $this->neo4jBuilder()
+            ->from('Bar')
+            ->matchRelationship('Bar2', 'Foo')
+            ->where('foo.name', 'Ada');
+        $count->aggregate = ['function' => 'count', 'columns' => ['*']];
+
+        // With a relationship MATCH, count(n) counts paths (not distinct nodes).
+        self::assertSame(
+            'MATCH (n:Bar)-[bar2:Bar2]-(foo:Foo) WHERE (foo.name = $p0) RETURN count(n) AS aggregate',
+            $count->toSql()
+        );
+    }
+
+    public function testCompilesMatchRelationshipOutgoingDirection(): void
+    {
+        $builder = $this->neo4jBuilder()
+            ->from('Foo')
+            ->matchRelationship('Baz>', 'Bar');
+
+        self::assertSame(
+            'MATCH (n:Foo)-[baz:Baz]->(bar:Bar) RETURN n',
+            $builder->toSql()
+        );
+    }
+
+    public function testCompilesMatchRelationshipIncomingDirection(): void
+    {
+        $builder = $this->neo4jBuilder()
+            ->from('Foo')
+            ->matchRelationship('<Baz', 'Bar');
+
+        self::assertSame(
+            'MATCH (n:Foo)<-[baz:Baz]-(bar:Bar) RETURN n',
+            $builder->toSql()
+        );
+    }
+
+    public function testCompilesMatchRelationshipDirectionFromWhiteboardStyleType(): void
+    {
+        $builder = $this->neo4jBuilder()
+            ->from('Foo')
+            ->matchRelationship(':Baz >', 'Bar');
+
+        self::assertSame(
+            'MATCH (n:Foo)-[baz:Baz]->(bar:Bar) RETURN n',
+            $builder->toSql()
+        );
+    }
+
+    public function testCompilesMatchRelationshipWithRelatedClosureConstraints(): void
+    {
+        $builder = $this->neo4jBuilder()
+            ->from('Foo')
+            ->matchRelationship('Baz>', 'Bar', function ($query): void {
+                $query->where('x', 0)->where('y', 1);
+            });
+
+        self::assertSame(
+            'MATCH (n:Foo)-[baz:Baz]->(bar:Bar) WHERE ((bar.x = $p0) AND (bar.y = $p1)) '
+                .'RETURN n',
+            $builder->toSql()
+        );
+        self::assertSame([0, 1], $builder->getBindings());
+    }
+
+    public function testCompilesMatchRelationshipWithAliasesAndClosure(): void
+    {
+        $builder = $this->neo4jBuilder()
+            ->from('Foo')
+            ->matchRelationship('Baz>', 'Bar', 'edge', 'node', function ($query): void {
+                $query->where('x', 0);
+            });
+
+        self::assertSame(
+            'MATCH (n:Foo)-[edge:Baz]->(node:Bar) WHERE (node.x = $p0) RETURN n',
+            $builder->toSql()
+        );
+        self::assertSame([0], $builder->getBindings());
+    }
+
+    public function testMatchRelationshipSameLabelKeepsPrimaryVariableMapping(): void
+    {
+        $builder = $this->neo4jBuilder()
+            ->from('Foo')
+            ->matchRelationship('KNOWS>', 'Foo', 'knows', 'friend')
+            ->where('Foo.name', 'Ada')
+            ->where('friend.name', 'Bob');
+
+        self::assertSame(
+            'MATCH (n:Foo)-[knows:KNOWS]->(friend:Foo) WHERE ((n.name = $p0) AND (friend.name = $p1)) '
+                .'RETURN n',
+            $builder->toSql()
+        );
+        self::assertSame(['Ada', 'Bob'], $builder->getBindings());
+    }
+
+    public function testCompilesInsertRelationshipOutgoing(): void
+    {
+        $grammar = new Neo4jQueryGrammar();
+        $builder = $this->neo4jBuilder()->from('Person');
+
+        $sql = $grammar->compileInsertRelationship($builder, [
+            'type' => 'ACTED_IN',
+            'related' => 'Movie',
+            'relationship' => 'acted_in',
+            'relatedAlias' => 'movie',
+            'direction' => 'out',
+            'fromColumns' => ['id'],
+            'toColumns' => ['id'],
+            'propertyColumns' => ['roles'],
+        ]);
+
+        self::assertSame(
+            'MATCH (n:Person {id: $p0}), (movie:Movie {id: $p1}) '
+                .'CREATE (n)-[acted_in:ACTED_IN {roles: $p2}]->(movie)',
+            $sql
+        );
+    }
+
+    public function testCompilesInsertRelationshipIncoming(): void
+    {
+        $grammar = new Neo4jQueryGrammar();
+        $builder = $this->neo4jBuilder()->from('Movie');
+
+        $sql = $grammar->compileInsertRelationship($builder, [
+            'type' => 'ACTED_IN',
+            'related' => 'Person',
+            'relationship' => 'acted_in',
+            'relatedAlias' => 'person',
+            'direction' => 'in',
+            'fromColumns' => ['id'],
+            'toColumns' => ['id'],
+            'propertyColumns' => [],
+        ]);
+
+        self::assertSame(
+            'MATCH (n:Movie {id: $p0}), (person:Person {id: $p1}) '
+                .'CREATE (n)<-[acted_in:ACTED_IN]-(person)',
+            $sql
+        );
+    }
+
+    public function testInsertRelationshipRequiresDirectedType(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('requires a directed type');
+
+        $this->neo4jBuilder()
+            ->from('Person')
+            ->insertRelationship('ACTED_IN', 'Movie', ['id' => 1], ['id' => 2]);
+    }
+
+    public function testRejectsMatchRelationshipCombinedWithUpdate(): void
+    {
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('Updates with matchRelationship()');
+
+        $builder = $this->neo4jBuilder()
+            ->from('Bar')
+            ->matchRelationship('Bar2', 'Foo')
+            ->where('id', 1);
+
+        (new Neo4jQueryGrammar())->compileUpdate($builder, ['status' => 'x']);
+    }
+
+    public function testRejectsMatchRelationshipCombinedWithDelete(): void
+    {
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('Deletes with matchRelationship()');
+
+        $builder = $this->neo4jBuilder()
+            ->from('Bar')
+            ->matchRelationship('Bar2', 'Foo');
+
+        (new Neo4jQueryGrammar())->compileDelete($builder);
+    }
+
+    public function testRejectsMatchRelationshipCombinedWithVectorSimilarity(): void
+    {
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('matchRelationship() cannot be combined with whereVectorSimilarTo()');
+
+        $this->neo4jBuilder()
+            ->from('Movie')
+            ->matchRelationship('SIMILAR_TO>', 'Movie')
+            ->whereVectorSimilarTo('embedding', [0.1, 0.2], 0.5)
+            ->toSql();
+    }
+
+    public function testRejectsMatchRelationshipWhenDefaultAliasesCollide(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('aliases collide');
+
+        $this->neo4jBuilder()
+            ->from('Person')
+            ->matchRelationship('FRIEND', 'Friend');
+    }
+
+    public function testRejectsMatchRelationshipWhenAliasIsReservedN(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('cannot be "n"');
+
+        $this->neo4jBuilder()
+            ->from('Person')
+            ->matchRelationship('KNOWS>', 'Person', 'knows', 'n');
+    }
+
+    public function testRejectsMatchRelationshipClosureWithNonWhereClauses(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('may only add WHERE constraints');
+
+        $this->neo4jBuilder()
+            ->from('Foo')
+            ->matchRelationship('Baz>', 'Bar', function ($query): void {
+                $query->where('x', 0)->orderBy('x');
+            });
+    }
+
+    public function testInsertRelationshipRequiresNonEmptyKeys(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('non-empty from and to property maps');
+
+        $this->neo4jBuilder()
+            ->from('Person')
+            ->insertRelationship('ACTED_IN>', 'Movie', [], ['id' => 2]);
+    }
+
+    public function testRejectsInsertRelationshipCombinedWithMatchRelationship(): void
+    {
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('cannot be combined with matchRelationship()');
+
+        $this->neo4jBuilder()
+            ->from('Person')
+            ->matchRelationship('ACTED_IN>', 'Movie')
+            ->insertRelationship('ACTED_IN>', 'Movie', ['id' => 1], ['id' => 2]);
+    }
+
+    public function testRejectsInsertRelationshipWhenDefaultAliasesCollide(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('aliases collide');
+
+        $this->neo4jBuilder()
+            ->from('Person')
+            ->insertRelationship('FRIEND>', 'Friend', ['id' => 1], ['id' => 2]);
+    }
+
     private function vectorBuilder(): Neo4jQueryBuilder
     {
         return new Neo4jQueryBuilder(
@@ -626,7 +971,7 @@ final class Neo4jQueryGrammarTest extends TestCase
     }
 
     private function neo4jBuilder(): Neo4jQueryBuilder
-    {
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        {
         return new Neo4jQueryBuilder(
             $this->createMock(ConnectionInterface::class),
             new Neo4jQueryGrammar(),
