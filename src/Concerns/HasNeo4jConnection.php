@@ -2,7 +2,10 @@
 
 namespace Neo4j\Neo4jLaravel\Concerns;
 
+use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Str;
+use Neo4j\Neo4jLaravel\Relations\MatchRelationship;
 
 /**
  * Configure a standard Eloquent model for Neo4j node persistence.
@@ -16,6 +19,9 @@ use Illuminate\Support\Str;
  *
  * Many-to-many uses stock Eloquent BelongsToMany against a pivot label
  * (e.g. RoleUser). Joins compile to multi-node MATCH + equality WHERE.
+ *
+ * Graph relationships use {@see matchRelationship()} (Eloquent Relation) on top
+ * of Query Builder {@see \Neo4j\Neo4jLaravel\Neo4jQueryBuilder::matchRelationship()}.
  */
 trait HasNeo4jConnection
 {
@@ -35,6 +41,52 @@ trait HasNeo4jConnection
         $this->connection ??= 'neo4j';
         $this->incrementing = false;
         $this->keyType = 'string';
+    }
+
+    /**
+     * Define a first-class Neo4j graph relationship (Eloquent Relation).
+     *
+     * Direction markers match the Query Builder API (`Type>`, `<Type`, bare type).
+     *
+     * @template TRelatedModel of \Illuminate\Database\Eloquent\Model
+     *
+     * @param  class-string<TRelatedModel>  $related
+     * @return \Neo4j\Neo4jLaravel\Relations\MatchRelationship<TRelatedModel, $this>
+     */
+    public function matchRelationship(
+        string $related,
+        string $relationshipType,
+        ?string $localKey = null,
+        ?string $relatedKey = null,
+    ): MatchRelationship {
+        /** @var TRelatedModel $instance */
+        $instance = $this->newRelatedInstance($related);
+
+        return $this->newMatchRelationship(
+            $instance->newQuery(),
+            $this,
+            $relationshipType,
+            $localKey ?: $this->getKeyName(),
+            $relatedKey ?: $instance->getKeyName(),
+        );
+    }
+
+    /**
+     * @template TRelatedModel of \Illuminate\Database\Eloquent\Model
+     * @template TDeclaringModel of \Illuminate\Database\Eloquent\Model
+     *
+     * @param  \Illuminate\Database\Eloquent\Builder<TRelatedModel>  $query
+     * @param  TDeclaringModel  $parent
+     * @return \Neo4j\Neo4jLaravel\Relations\MatchRelationship<TRelatedModel, TDeclaringModel>
+     */
+    protected function newMatchRelationship(
+        Builder $query,
+        Model $parent,
+        string $relationshipType,
+        string $localKey,
+        string $relatedKey,
+    ): MatchRelationship {
+        return new MatchRelationship($query, $parent, $relationshipType, $localKey, $relatedKey);
     }
 
     /**
