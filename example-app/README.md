@@ -105,6 +105,63 @@ This will start:
 -   Laravel development server at http://127.0.0.1:8000
 -   Vite for frontend assets at http://localhost:5173
 
+## Eloquent graph relationships (`Person` / `Movie`)
+
+`App\Models\Person` and `App\Models\Movie` use Eloquent `matchRelationship()` for
+first-class Cypher edges (`ACTED_IN`). Try them in Tinker:
+
+```bash
+php artisan tinker
+```
+
+### Insert a relationship (`attach`)
+
+Create nodes, then insert a directed edge (and optional relationship properties):
+
+```php
+use App\Models\Person;
+use App\Models\Movie;
+
+$keanu = Person::create(['name' => 'Keanu']);
+$matrix = Movie::create(['title' => 'The Matrix', 'released' => 1999]);
+
+$keanu->movies()->attach($matrix->id, ['roles' => ['Neo']]);
+
+$keanu->fresh()->movies->pluck('title');   // ["The Matrix"]
+$matrix->fresh()->actors->pluck('name');   // ["Keanu"]
+```
+
+### Create related node + relationship (`create`)
+
+```php
+$keanu->movies()->create(
+    ['title' => 'John Wick', 'released' => 2014],
+    ['roles' => ['John']],
+);
+```
+
+### Query Builder `insertRelationship`
+
+Same graph write without Eloquent models:
+
+```php
+use Illuminate\Support\Facades\DB;
+
+DB::connection('neo4j')
+    ->table('Person')
+    ->insertRelationship(
+        'ACTED_IN>',
+        'Movie',
+        ['id' => $keanu->id],
+        ['id' => $matrix->id],
+        ['roles' => ['Neo']],
+    );
+```
+
+Direction markers match the package API (`Type>`, `<Type`, bare type).
+`attach` / `insertRelationship` use `CREATE` (not `MERGE`) — calling them twice
+with the same keys creates duplicate edges.
+
 ## Testing the Integration
 
 1. Create a user:

@@ -273,9 +273,30 @@ Foreign-key relations work with stock Eloquent APIs against node properties
 
 Including lazy load, `with(...)` eager load, `$user->profile()->create([...])`,
 `$user->posts()->create([...])`, and `$user->roles()->attach([...])` / `detach`.
-Eloquent `whereHas` / native graph relation types on models are not part of this
-surface yet; use Query Builder `matchRelationship()` /
-`insertRelationship()` for `(a)-[:REL]->(b)` patterns.
+
+For first-class Cypher relationships on Eloquent models, use the same
+`matchRelationship()` name as on the Query Builder — it returns an Eloquent
+`MatchRelationship` relation (lazy load, constrained query, `with()`,
+`attach()`, `create()`):
+
+```php
+class Person extends Neo4jModel
+{
+    public function movies()
+    {
+        return $this->matchRelationship(Movie::class, 'ACTED_IN>');
+    }
+}
+
+$person->movies;                              // lazy
+$person->movies()->where('title', '…')->get(); // constrained
+Person::with('movies')->get();                // eager
+$person->movies()->attach($movie->id, ['roles' => ['Neo']]);
+$person->movies()->create(['title' => 'The Matrix'], ['roles' => ['Neo']]);
+```
+
+Direction markers match the Query Builder (`Type>`, `<Type`, bare type).
+`whereHas` / `withCount` on these graph relations are not supported yet.
 
 For a dedicated graph model, the package also provides
 `Neo4j\Neo4jLaravel\Neo4jModel`, which already includes the concern.
@@ -524,6 +545,7 @@ CYPHER, [
 - Seamless integration with Laravel's database layer
 - Support for both DB Facade and Neo4j Client Interface
 - Query Builder `matchRelationship()` / `insertRelationship()` for Cypher patterns
+- Eloquent `matchRelationship()` Relation for graph edges on models (lazy / eager / attach)
 - Transaction support
 - Parameterized queries
 - Optional Laravel Debugbar support (Cypher in the shared Queries tab)
