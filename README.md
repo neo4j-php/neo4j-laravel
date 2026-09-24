@@ -168,6 +168,55 @@ Current limits:
 - Full outer joins are not supported
 - `groupBy` / `having` cannot be combined with joins yet
 
+### Query Builder relationships
+
+Use `matchRelationship()` on the Neo4j query builder for a first-class Cypher
+relationship pattern (one relationship per query for now):
+
+```php
+use Illuminate\Support\Facades\DB;
+
+$rows = DB::connection('neo4j')
+    ->table('Person')
+    ->matchRelationship('ACTED_IN>', 'Movie', 'role', 'film')
+    ->where('role.roles', 'Neo')
+    ->where('film.title', 'The Matrix')
+    ->get();
+// MATCH (n:Person)-[role:ACTED_IN]->(film:Movie) WHERE ... RETURN n
+```
+
+Direction markers on the type: `Type>` / `>Type` (outgoing), `<Type` / `Type<`
+(incoming), bare `Type` (undirected). An optional closure may only add WHERE
+constraints on the related node (unqualified columns are scoped to that alias).
+
+Default `RETURN` is `n` (Eloquent-safe). Select relationship / related variables
+explicitly when you need graph rows:
+
+```php
+$rows = DB::connection('neo4j')
+    ->table('Person')
+    ->matchRelationship('ACTED_IN>', 'Movie', 'role', 'film')
+    ->where('role.roles', 'Neo')
+    ->select(['n', 'role', 'film'])
+    ->get();
+```
+
+Create a directed relationship between existing nodes with `insertRelationship()`
+(uses `CREATE`, not `MERGE` — duplicate calls create duplicate edges; builder
+`where()` clauses are ignored, only the property maps are used):
+
+```php
+DB::connection('neo4j')
+    ->table('Person')
+    ->insertRelationship(
+        'ACTED_IN>',
+        'Movie',
+        ['id' => $personId],
+        ['id' => $movieId],
+        ['roles' => ['Neo']],
+    );
+```
+
 ### Using Eloquent
 
 Add `HasNeo4jConnection` to a standard Eloquent model. The model class name is
@@ -218,6 +267,27 @@ Laravel's `SoftDeletes` trait works on Neo4j models (`deleted_at` property,
 Pagination APIs (`paginate`, `simplePaginate`, `cursorPaginate`) work via
 Cypher `SKIP` / `LIMIT` and aggregates for totals.
 
+Subquery filters use stock Laravel APIs (`whereIn` / `whereNotIn` with a
+closure, query builder, Eloquent builder, or relation; and `whereExists` /
+`whereNotExists`). They compile to Cypher `COLLECT { }` / `EXISTS { }`:
+
+```php
+User::query()
+    ->whereIn('id', function ($query) {
+        $query->select('user_id')->from('Post');
+    })
+    ->get();
+
+User::query()
+    ->whereIn('id', $user->posts()->select('user_id'))
+    ->get();
+```
+
+Use `DB::connection('neo4j')->table(...)` or Eloquent on a Neo4j model for
+these. Constructing `new Builder($connection, new Neo4jQueryGrammar)` by hand
+still goes through Laravel's compiled Expression path for subquery `whereIn`
+and is not supported — that path throws at compile time.
+
 Foreign-key relations work with stock Eloquent APIs against node properties
 (for example `Profile.user_id` / `Post.user_id` pointing at `User.id`):
 
@@ -231,8 +301,30 @@ Foreign-key relations work with stock Eloquent APIs against node properties
 
 Including lazy load, `with(...)` eager load, `$user->profile()->create([...])`,
 `$user->posts()->create([...])`, and `$user->roles()->attach([...])` / `detach`.
-Graph relationship types (`(a)-[:REL]->(b)`) and `whereHas` are not part of this
-surface yet.
+
+For first-class Cypher relationships on Eloquent models, use the same
+`matchRelationship()` name as on the Query Builder — it returns an Eloquent
+`MatchRelationship` relation (lazy load, constrained query, `with()`,
+`attach()`, `create()`):
+
+```php
+class Person extends Neo4jModel
+{
+    public function movies()
+    {
+        return $this->matchRelationship(Movie::class, 'ACTED_IN>');
+    }
+}
+
+$person->movies;                              // lazy
+$person->movies()->where('title', '…')->get(); // constrained
+Person::with('movies')->get();                // eager
+$person->movies()->attach($movie->id, ['roles' => ['Neo']]);
+$person->movies()->create(['title' => 'The Matrix'], ['roles' => ['Neo']]);
+```
+
+Direction markers match the Query Builder (`Type>`, `<Type`, bare type).
+`whereHas` / `withCount` on these graph relations are not supported yet.
 
 For a dedicated graph model, the package also provides
 `Neo4j\Neo4jLaravel\Neo4jModel`, which already includes the concern.
@@ -481,6 +573,8 @@ CYPHER, [
 - Seamless integration with Laravel's database layer
 - Support for both DB Facade and Neo4j Client Interface
 - Query Builder joins (`join`, `leftJoin`, `rightJoin`) compiled to Cypher `MATCH` / `OPTIONAL MATCH`
+- Query Builder `matchRelationship()` / `insertRelationship()` for Cypher patterns
+- Eloquent `matchRelationship()` Relation for graph edges on models (lazy / eager / attach)
 - Transaction support
 - Parameterized queries
 - Optional Laravel Debugbar support (Cypher in the shared Queries tab)
