@@ -22,7 +22,7 @@ use WikibaseSolutions\CypherDSL\Types\PropertyTypes\BooleanType;
  *                        (cartesian-product style for inner/cross)
  *   - leftJoin()       -> MATCH (n) OPTIONAL MATCH (join) WHERE <ON>
  *   - rightJoin()      -> MATCH (join) OPTIONAL MATCH (n) WHERE <ON>
- *                        (single right join; not mixed with left joins)
+ *                        (single right join alone; not mixed with other joins)
  *   - select(columns)  -> RETURN n.col, ... (including `as` aliases / table.*)
  *   - where (Basic, Null, NotNull, In, NotIn, Between/NotBetween, Nested,
  *            Column, raw, Date, Time, Day, Month, Year)
@@ -330,14 +330,10 @@ final class Neo4jQueryGrammar extends Grammar
     private function compileOuterJoinMatchPrefix(Builder $query, array $variables): string
     {
         $joins = $query->joins ?? [];
-        $leftCount = 0;
         $rightCount = 0;
 
         foreach ($joins as $join) {
-            $type = $this->normalizeJoinType((string) $join->type);
-            if ($type === 'left') {
-                $leftCount++;
-            } elseif ($type === 'right') {
+            if ($this->normalizeJoinType((string) $join->type) === 'right') {
                 $rightCount++;
             }
         }
@@ -346,8 +342,10 @@ final class Neo4jQueryGrammar extends Grammar
             throw new RuntimeException('Multiple right joins are not supported on Neo4j Query Builder yet.');
         }
 
-        if ($rightCount === 1 && $leftCount > 0) {
-            throw new RuntimeException('Mixing left and right joins is not supported on Neo4j Query Builder yet.');
+        if ($rightCount === 1 && count($joins) > 1) {
+            throw new RuntimeException(
+                'rightJoin cannot be combined with other joins on Neo4j Query Builder yet.'
+            );
         }
 
         $cypher = $rightCount === 1
@@ -405,7 +403,7 @@ final class Neo4jQueryGrammar extends Grammar
     }
 
     /**
-     * rightJoin table required, from() optional.
+     * Single rightJoin only; from() is required (preserved as OPTIONAL MATCH n).
      *
      * @param  array<string, string>  $variables
      */
@@ -429,28 +427,13 @@ final class Neo4jQueryGrammar extends Grammar
         $variable = $table['alias'] ?? $table['name'];
         $parts = ['MATCH ('.$variable.':'.$table['name'].')'];
 
-        foreach ($query->joins ?? [] as $join) {
-            if (! is_string($join->table)) {
-                throw new RuntimeException('Subquery and expression joins are not supported on Neo4j Query Builder.');
-            }
-
-            $type = $this->normalizeJoinType((string) $join->type);
-
-            if ($type === 'right') {
-                $clause = 'OPTIONAL MATCH (n:'.$from['name'].')';
-            } else {
-                $joinTable = $this->parseTableName($join->table);
-                $joinVariable = $joinTable['alias'] ?? $joinTable['name'];
-                $clause = 'MATCH ('.$joinVariable.':'.$joinTable['name'].')';
-            }
-
-            $onWhere = $this->compileWhereExpression($join->wheres ?? [], $variables);
-            if ($onWhere !== null) {
-                $clause .= ' '.Query::new()->where($onWhere)->build();
-            }
-
-            $parts[] = $clause;
+        $clause = 'OPTIONAL MATCH (n:'.$from['name'].')';
+        $onWhere = $this->compileWhereExpression($rightJoin->wheres ?? [], $variables);
+        if ($onWhere !== null) {
+            $clause .= ' '.Query::new()->where($onWhere)->build();
         }
+
+        $parts[] = $clause;
 
         return implode(' ', $parts);
     }

@@ -464,13 +464,100 @@ final class Neo4jQueryGrammarTest extends TestCase
         );
     }
 
+    public function testCompilesMultipleLeftJoins(): void
+    {
+        $builder = $this->builder()
+            ->from('Role')
+            ->leftJoin('RoleUser', 'Role.id', '=', 'RoleUser.role_id')
+            ->leftJoin('User', 'RoleUser.user_id', '=', 'User.id')
+            ->select(['Role.*', 'User.name as user_name']);
+
+        self::assertSame(
+            'MATCH (n:Role) OPTIONAL MATCH (RoleUser:RoleUser) WHERE n.id = RoleUser.role_id '
+                .'OPTIONAL MATCH (User:User) WHERE RoleUser.user_id = User.id '
+                .'RETURN n, User.name AS user_name',
+            $builder->toSql()
+        );
+    }
+
+    public function testCompilesLeftJoinMixedWithInnerJoin(): void
+    {
+        $builder = $this->builder()
+            ->from('Role')
+            ->join('RoleUser', 'Role.id', '=', 'RoleUser.role_id')
+            ->leftJoin('User', 'RoleUser.user_id', '=', 'User.id')
+            ->select(['Role.*', 'User.name as user_name']);
+
+        self::assertSame(
+            'MATCH (n:Role) MATCH (RoleUser:RoleUser) WHERE n.id = RoleUser.role_id '
+                .'OPTIONAL MATCH (User:User) WHERE RoleUser.user_id = User.id '
+                .'RETURN n, User.name AS user_name',
+            $builder->toSql()
+        );
+    }
+
+    public function testCompilesLeftJoinWithAggregateOrderAndLimit(): void
+    {
+        $builder = $this->builder()
+            ->from('Role')
+            ->leftJoin('RoleUser', 'Role.id', '=', 'RoleUser.role_id')
+            ->orderBy('Role.name')
+            ->limit(10);
+        $builder->aggregate = ['function' => 'count', 'columns' => ['*']];
+
+        self::assertSame(
+            'MATCH (n:Role) OPTIONAL MATCH (RoleUser:RoleUser) WHERE n.id = RoleUser.role_id '
+                .'RETURN count(n) AS aggregate',
+            $builder->toSql()
+        );
+
+        $ordered = $this->builder()
+            ->from('Role')
+            ->leftJoin('RoleUser', 'Role.id', '=', 'RoleUser.role_id')
+            ->orderBy('Role.name')
+            ->offset(5)
+            ->limit(10)
+            ->select(['Role.*']);
+
+        self::assertSame(
+            'MATCH (n:Role) OPTIONAL MATCH (RoleUser:RoleUser) WHERE n.id = RoleUser.role_id '
+                .'RETURN n ORDER BY n.name ASC SKIP 5 LIMIT 10',
+            $ordered->toSql()
+        );
+    }
+
     public function testRejectsMixingLeftAndRightJoins(): void
     {
         $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('rightJoin cannot be combined with other joins');
 
         $this->builder()
             ->from('Role')
             ->leftJoin('RoleUser', 'Role.id', '=', 'RoleUser.role_id')
+            ->rightJoin('User', 'RoleUser.user_id', '=', 'User.id')
+            ->toSql();
+    }
+
+    public function testRejectsRightJoinMixedWithInnerJoin(): void
+    {
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('rightJoin cannot be combined with other joins');
+
+        $this->builder()
+            ->from('Role')
+            ->join('RoleUser', 'Role.id', '=', 'RoleUser.role_id')
+            ->rightJoin('User', 'RoleUser.user_id', '=', 'User.id')
+            ->toSql();
+    }
+
+    public function testRejectsMultipleRightJoins(): void
+    {
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('Multiple right joins are not supported');
+
+        $this->builder()
+            ->from('Role')
+            ->rightJoin('RoleUser', 'Role.id', '=', 'RoleUser.role_id')
             ->rightJoin('User', 'RoleUser.user_id', '=', 'User.id')
             ->toSql();
     }

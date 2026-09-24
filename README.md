@@ -140,6 +140,34 @@ try {
 }
 ```
 
+### Query Builder joins
+
+Laravel-style joins on the Neo4j connection compile to multi-node Cypher:
+
+| Laravel | Cypher |
+|---------|--------|
+| `join()` / `crossJoin()` | `MATCH (n:Label), (join:JoinLabel)` + equality `WHERE` |
+| `leftJoin()` | `MATCH (n) OPTIONAL MATCH (join) WHERE <ON>` |
+| `rightJoin()` | `MATCH (join) OPTIONAL MATCH (n) WHERE <ON>` |
+
+Query `where()` clauses after an outer join are applied after `WITH`, matching SQL
+post-join filter semantics (a filter on the optional side can drop unmatched rows).
+
+```php
+DB::connection('neo4j')
+    ->table('Role')
+    ->leftJoin('RoleUser', 'Role.id', '=', 'RoleUser.role_id')
+    ->select(['Role.*', 'RoleUser.user_id as pivot_user_id'])
+    ->get();
+```
+
+Current limits:
+
+- Multiple `leftJoin`s (and `leftJoin` mixed with inner `join`) are supported
+- A query may use only a single `rightJoin`, with no other joins
+- Full outer joins are not supported
+- `groupBy` / `having` cannot be combined with joins yet
+
 ### Using Eloquent
 
 Add `HasNeo4jConnection` to a standard Eloquent model. The model class name is
@@ -452,6 +480,7 @@ CYPHER, [
 
 - Seamless integration with Laravel's database layer
 - Support for both DB Facade and Neo4j Client Interface
+- Query Builder joins (`join`, `leftJoin`, `rightJoin`) compiled to Cypher `MATCH` / `OPTIONAL MATCH`
 - Transaction support
 - Parameterized queries
 - Optional Laravel Debugbar support (Cypher in the shared Queries tab)
