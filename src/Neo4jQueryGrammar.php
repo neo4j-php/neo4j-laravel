@@ -19,7 +19,10 @@ use WikibaseSolutions\CypherDSL\Types\PropertyTypes\BooleanType;
  * Supported today (select path):
  *   - from() / table() -> MATCH (n:Label)
  *   - join()           -> MATCH (n:Label), (join:JoinLabel) + equality WHERE
- *                        (cartesian-product style; inner/cross only)
+ *                        (cartesian-product style for inner/cross)
+ *   - leftJoin()       -> MATCH (n) OPTIONAL MATCH (join) WHERE <ON>
+ *   - rightJoin()      -> MATCH (join) OPTIONAL MATCH (n) WHERE <ON>
+ *                        (single right join alone; not mixed with other joins)
  *   - matchRelationship(type, relatedLabel) -> MATCH (n:Label)-[rel:Type]-(related:Related)
  *     (single relationship; direction markers Type> / <Type; optional WHERE-only related-node closure)
  *     Default RETURN is n (select rel/related explicitly for graph rows)
@@ -171,11 +174,20 @@ final class Neo4jQueryGrammar extends Grammar
         }
 
         $variables = $this->compileVariableMap($query);
-        $prefix = $this->compileMatchPrefix($query);
-        $where = $this->compileWhereExpression($this->mergeJoinWheres($query), $variables);
 
-        if ($where !== null) {
-            $prefix .= ' '.Query::new()->where($where)->build();
+        if ($this->hasOuterJoins($query)) {
+            if ($this->graphRelationships($query) !== []) {
+                throw new RuntimeException('matchRelationship() cannot be combined with join() on Neo4j Query Builder.');
+            }
+
+            $prefix = $this->compileOuterJoinMatchPrefix($query, $variables);
+        } else {
+            $prefix = $this->compileMatchPrefix($query);
+            $where = $this->compileWhereExpression($this->mergeJoinWheres($query), $variables);
+
+            if ($where !== null) {
+                $prefix .= ' '.Query::new()->where($where)->build();
+            }
         }
 
         if ($query->aggregate !== null) {
@@ -250,8 +262,8 @@ final class Neo4jQueryGrammar extends Grammar
         }
 
         foreach ($query->joins ?? [] as $join) {
-            $type = strtolower((string) $join->type);
-            if (! in_array($type, ['inner', 'cross'], true)) {
+            $type = $this->normalizeJoinType((string) $join->type);
+            if (! in_array($type, ['inner', 'cross', 'left', 'right'], true)) {
                 throw new RuntimeException("Unsupported join type for Neo4j Query Builder: {$join->type}");
             }
 
@@ -371,6 +383,185 @@ final class Neo4jQueryGrammar extends Grammar
         };
 
         return 'MATCH '.$pattern;
+    }
+
+    /**
+     * Whether the query uses left/right (outer) joins that need OPTIONAL MATCH.
+     */
+    private function hasOuterJoins(Builder $query): bool
+    {
+        foreach ($query->joins ?? [] as $join) {
+            $type = $this->normalizeJoinType((string) $join->type);
+            if ($type === 'left' || $type === 'right') {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Normalize Laravel join type strings to inner|cross|left|right.
+     */
+    private function normalizeJoinType(string $type): string
+    {
+        $type = strtolower(trim($type));
+
+        return match ($type) {
+            'left', 'left outer' => 'left',
+            'right', 'right outer' => 'right',
+            'inner', 'cross' => $type,
+            'outer', 'full', 'full outer' => throw new RuntimeException(
+                "Unsupported join type for Neo4j Query Builder: {$type} (use leftJoin/rightJoin)."
+            ),
+            default => $type,
+        };
+    }
+
+    /**
+     * Compile left/right joins as sequential MATCH / OPTIONAL MATCH clauses.
+     *
+     * Join ON predicates stay with their OPTIONAL MATCH. Query WHERE clauses
+     * are applied after WITH so they follow SQL post-join filter semantics.
+     *
+     * @param  array<string, string>  $variables
+     */
+    private function compileOuterJoinMatchPrefix(Builder $query, array $variables): string
+    {
+        $joins = $query->joins ?? [];
+        $rightCount = 0;
+
+        foreach ($joins as $join) {
+            if ($this->normalizeJoinType((string) $join->type) === 'right') {
+                $rightCount++;
+            }
+        }
+
+        if ($rightCount > 1) {
+            throw new RuntimeException('Multiple right joins are not supported on Neo4j Query Builder yet.');
+        }
+
+        if ($rightCount === 1 && count($joins) > 1) {
+            throw new RuntimeException(
+                'rightJoin cannot be combined with other joins on Neo4j Query Builder yet.'
+            );
+        }
+
+        $cypher = $rightCount === 1
+            ? $this->compileRightJoinMatchClauses($query, $variables)
+            : $this->compileLeftJoinMatchClauses($query, $variables);
+
+        $queryWheres = $query->wheres ?? [];
+        if ($queryWheres === []) {
+            return $cypher;
+        }
+
+        $cypher .= ' WITH '.$this->compileJoinWithVariables($query);
+        $where = $this->compileWhereExpression($queryWheres, $variables);
+
+        if ($where !== null) {
+            $cypher .= ' '.Query::new()->where($where)->build();
+        }
+
+        return $cypher;
+    }
+
+    /**
+     * from() required, left/inner joins as OPTIONAL MATCH / MATCH.
+     *
+     * @param  array<string, string>  $variables
+     */
+    private function compileLeftJoinMatchClauses(Builder $query, array $variables): string
+    {
+        $from = $this->parseTableName($query->from);
+        $parts = ['MATCH (n:'.$from['name'].')'];
+
+        foreach ($query->joins ?? [] as $join) {
+            if (! is_string($join->table)) {
+                throw new RuntimeException('Subquery and expression joins are not supported on Neo4j Query Builder.');
+            }
+
+            $table = $this->parseTableName($join->table);
+            $variable = $table['alias'] ?? $table['name'];
+            $pattern = "({$variable}:{$table['name']})";
+            $type = $this->normalizeJoinType((string) $join->type);
+
+            $clause = $type === 'left'
+                ? 'OPTIONAL MATCH '.$pattern
+                : 'MATCH '.$pattern;
+
+            $onWhere = $this->compileWhereExpression($join->wheres ?? [], $variables);
+            if ($onWhere !== null) {
+                $clause .= ' '.Query::new()->where($onWhere)->build();
+            }
+
+            $parts[] = $clause;
+        }
+
+        return implode(' ', $parts);
+    }
+
+    /**
+     * Single rightJoin only; from() is required (preserved as OPTIONAL MATCH n).
+     *
+     * @param  array<string, string>  $variables
+     */
+    private function compileRightJoinMatchClauses(Builder $query, array $variables): string
+    {
+        $from = $this->parseTableName($query->from);
+        $rightJoin = null;
+
+        foreach ($query->joins ?? [] as $join) {
+            if ($this->normalizeJoinType((string) $join->type) === 'right') {
+                $rightJoin = $join;
+                break;
+            }
+        }
+
+        if ($rightJoin === null || ! is_string($rightJoin->table)) {
+            throw new RuntimeException('Invalid right join for Neo4j Query Builder.');
+        }
+
+        $table = $this->parseTableName($rightJoin->table);
+        $variable = $table['alias'] ?? $table['name'];
+        $parts = ['MATCH ('.$variable.':'.$table['name'].')'];
+
+        $clause = 'OPTIONAL MATCH (n:'.$from['name'].')';
+        $onWhere = $this->compileWhereExpression($rightJoin->wheres ?? [], $variables);
+        if ($onWhere !== null) {
+            $clause .= ' '.Query::new()->where($onWhere)->build();
+        }
+
+        $parts[] = $clause;
+
+        return implode(' ', $parts);
+    }
+
+    /**
+     * Variables carried across WITH after outer-join MATCH clauses.
+     */
+    private function compileJoinWithVariables(Builder $query): string
+    {
+        $parts = ['n'];
+        $seen = ['n' => true];
+
+        foreach ($query->joins ?? [] as $join) {
+            if (! is_string($join->table)) {
+                continue;
+            }
+
+            $table = $this->parseTableName($join->table);
+            $variable = $table['alias'] ?? $table['name'];
+
+            if (isset($seen[$variable])) {
+                continue;
+            }
+
+            $seen[$variable] = true;
+            $parts[] = $variable;
+        }
+
+        return implode(', ', $parts);
     }
 
     /**
@@ -774,11 +965,20 @@ final class Neo4jQueryGrammar extends Grammar
         }
 
         $variables = $this->compileVariableMap($query);
-        $cypher = $this->compileMatchPrefix($query);
-        $where = $this->compileWhereExpression($this->mergeJoinWheres($query), $variables);
 
-        if ($where !== null) {
-            $cypher .= ' '.Query::new()->where($where)->build();
+        if ($this->hasOuterJoins($query)) {
+            if ($this->graphRelationships($query) !== []) {
+                throw new RuntimeException('matchRelationship() cannot be combined with join() on Neo4j Query Builder.');
+            }
+
+            $cypher = $this->compileOuterJoinMatchPrefix($query, $variables);
+        } else {
+            $cypher = $this->compileMatchPrefix($query);
+            $where = $this->compileWhereExpression($this->mergeJoinWheres($query), $variables);
+
+            if ($where !== null) {
+                $cypher .= ' '.Query::new()->where($where)->build();
+            }
         }
 
         return $cypher.' RETURN true AS exists LIMIT 1';
