@@ -409,14 +409,391 @@ final class Neo4jQueryGrammarTest extends TestCase
         );
     }
 
-    public function testRejectsUnsupportedJoinTypes(): void
+    public function testCompilesLeftJoinAsOptionalMatch(): void
+    {
+        $builder = $this->builder()
+            ->from('Role')
+            ->leftJoin('RoleUser', 'Role.id', '=', 'RoleUser.role_id')
+            ->select([
+                'Role.*',
+                'RoleUser.user_id as pivot_user_id',
+                'RoleUser.role_id as pivot_role_id',
+            ]);
+
+        self::assertSame(
+            'MATCH (n:Role) OPTIONAL MATCH (RoleUser:RoleUser) WHERE n.id = RoleUser.role_id '
+                .'RETURN n, RoleUser.user_id AS pivot_user_id, RoleUser.role_id AS pivot_role_id',
+            $builder->toSql()
+        );
+    }
+
+    public function testCompilesLeftJoinWithQueryWhereViaWith(): void
+    {
+        $builder = $this->builder()
+            ->from('Role')
+            ->leftJoin('RoleUser', 'Role.id', '=', 'RoleUser.role_id')
+            ->where('RoleUser.user_id', 'user-1')
+            ->select([
+                'Role.*',
+                'RoleUser.user_id as pivot_user_id',
+            ]);
+
+        self::assertSame(
+            'MATCH (n:Role) OPTIONAL MATCH (RoleUser:RoleUser) WHERE n.id = RoleUser.role_id '
+                .'WITH n, RoleUser WHERE (RoleUser.user_id = $p0) '
+                .'RETURN n, RoleUser.user_id AS pivot_user_id',
+            $builder->toSql()
+        );
+        self::assertSame(['user-1'], $builder->getBindings());
+    }
+
+    public function testCompilesRightJoinAsOptionalMatchOnFromNode(): void
+    {
+        $builder = $this->builder()
+            ->from('Role')
+            ->rightJoin('RoleUser', 'Role.id', '=', 'RoleUser.role_id')
+            ->select([
+                'Role.*',
+                'RoleUser.user_id as pivot_user_id',
+            ]);
+
+        self::assertSame(
+            'MATCH (RoleUser:RoleUser) OPTIONAL MATCH (n:Role) WHERE n.id = RoleUser.role_id '
+                .'RETURN n, RoleUser.user_id AS pivot_user_id',
+            $builder->toSql()
+        );
+    }
+
+    public function testCompilesRightJoinWithQueryWhereViaWith(): void
+    {
+        $builder = $this->builder()
+            ->from('Role')
+            ->rightJoin('RoleUser', 'Role.id', '=', 'RoleUser.role_id')
+            ->where('Role.name', 'Admin')
+            ->select(['Role.*', 'RoleUser.user_id as pivot_user_id']);
+
+        self::assertSame(
+            'MATCH (RoleUser:RoleUser) OPTIONAL MATCH (n:Role) WHERE n.id = RoleUser.role_id '
+                .'WITH n, RoleUser WHERE (n.name = $p0) '
+                .'RETURN n, RoleUser.user_id AS pivot_user_id',
+            $builder->toSql()
+        );
+        self::assertSame(['Admin'], $builder->getBindings());
+    }
+
+    public function testCompilesLeftJoinExists(): void
+    {
+        $exists = $this->builder()
+            ->from('Role')
+            ->leftJoin('RoleUser', 'Role.id', '=', 'RoleUser.role_id');
+
+        self::assertSame(
+            'MATCH (n:Role) OPTIONAL MATCH (RoleUser:RoleUser) WHERE n.id = RoleUser.role_id '
+                .'RETURN true AS exists LIMIT 1',
+            (new Neo4jQueryGrammar())->compileExists($exists)
+        );
+    }
+
+    public function testCompilesMultipleLeftJoins(): void
+    {
+        $builder = $this->builder()
+            ->from('Role')
+            ->leftJoin('RoleUser', 'Role.id', '=', 'RoleUser.role_id')
+            ->leftJoin('User', 'RoleUser.user_id', '=', 'User.id')
+            ->select(['Role.*', 'User.name as user_name']);
+
+        self::assertSame(
+            'MATCH (n:Role) OPTIONAL MATCH (RoleUser:RoleUser) WHERE n.id = RoleUser.role_id '
+                .'OPTIONAL MATCH (User:User) WHERE RoleUser.user_id = User.id '
+                .'RETURN n, User.name AS user_name',
+            $builder->toSql()
+        );
+    }
+
+    public function testCompilesLeftJoinMixedWithInnerJoin(): void
+    {
+        $builder = $this->builder()
+            ->from('Role')
+            ->join('RoleUser', 'Role.id', '=', 'RoleUser.role_id')
+            ->leftJoin('User', 'RoleUser.user_id', '=', 'User.id')
+            ->select(['Role.*', 'User.name as user_name']);
+
+        self::assertSame(
+            'MATCH (n:Role) MATCH (RoleUser:RoleUser) WHERE n.id = RoleUser.role_id '
+                .'OPTIONAL MATCH (User:User) WHERE RoleUser.user_id = User.id '
+                .'RETURN n, User.name AS user_name',
+            $builder->toSql()
+        );
+    }
+
+    public function testCompilesLeftJoinWithAggregateOrderAndLimit(): void
+    {
+        $builder = $this->builder()
+            ->from('Role')
+            ->leftJoin('RoleUser', 'Role.id', '=', 'RoleUser.role_id')
+            ->orderBy('Role.name')
+            ->limit(10);
+        $builder->aggregate = ['function' => 'count', 'columns' => ['*']];
+
+        self::assertSame(
+            'MATCH (n:Role) OPTIONAL MATCH (RoleUser:RoleUser) WHERE n.id = RoleUser.role_id '
+                .'RETURN count(n) AS aggregate',
+            $builder->toSql()
+        );
+
+        $ordered = $this->builder()
+            ->from('Role')
+            ->leftJoin('RoleUser', 'Role.id', '=', 'RoleUser.role_id')
+            ->orderBy('Role.name')
+            ->offset(5)
+            ->limit(10)
+            ->select(['Role.*']);
+
+        self::assertSame(
+            'MATCH (n:Role) OPTIONAL MATCH (RoleUser:RoleUser) WHERE n.id = RoleUser.role_id '
+                .'RETURN n ORDER BY n.name ASC SKIP 5 LIMIT 10',
+            $ordered->toSql()
+        );
+    }
+
+    public function testRejectsMixingLeftAndRightJoins(): void
+    {
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('rightJoin cannot be combined with other joins');
+
+        $this->builder()
+            ->from('Role')
+            ->leftJoin('RoleUser', 'Role.id', '=', 'RoleUser.role_id')
+            ->rightJoin('User', 'RoleUser.user_id', '=', 'User.id')
+            ->toSql();
+    }
+
+    public function testRejectsRightJoinMixedWithInnerJoin(): void
+    {
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('rightJoin cannot be combined with other joins');
+
+        $this->builder()
+            ->from('Role')
+            ->join('RoleUser', 'Role.id', '=', 'RoleUser.role_id')
+            ->rightJoin('User', 'RoleUser.user_id', '=', 'User.id')
+            ->toSql();
+    }
+
+    public function testRejectsMultipleRightJoins(): void
+    {
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('Multiple right joins are not supported');
+
+        $this->builder()
+            ->from('Role')
+            ->rightJoin('RoleUser', 'Role.id', '=', 'RoleUser.role_id')
+            ->rightJoin('User', 'RoleUser.user_id', '=', 'User.id')
+            ->toSql();
+    }
+
+    public function testRejectsFullOuterJoinType(): void
     {
         $this->expectException(\RuntimeException::class);
 
         $this->builder()
             ->from('Role')
+            ->join('RoleUser', 'Role.id', '=', 'RoleUser.role_id', 'full outer')
+            ->toSql();
+    }
+
+    public function testCompilesLeftJoinClosureWhereOnOptionalMatch(): void
+    {
+        $builder = $this->builder()
+            ->from('Role')
+            ->leftJoin('RoleUser', function ($join): void {
+                $join->on('Role.id', '=', 'RoleUser.role_id')
+                    ->where('RoleUser.active', '=', true);
+            })
+            ->select(['Role.*']);
+
+        self::assertSame(
+            'MATCH (n:Role) OPTIONAL MATCH (RoleUser:RoleUser) WHERE (n.id = RoleUser.role_id AND (RoleUser.active = $p0)) '
+                .'RETURN n',
+            $builder->toSql()
+        );
+        self::assertSame([true], $builder->getBindings());
+    }
+
+    public function testCompilesLeftJoinPreservedSideWhereViaWith(): void
+    {
+        $builder = $this->builder()
+            ->from('Role')
+            ->leftJoin('RoleUser', 'Role.id', '=', 'RoleUser.role_id')
+            ->where('Role.name', 'Admin')
+            ->select(['Role.*']);
+
+        self::assertSame(
+            'MATCH (n:Role) OPTIONAL MATCH (RoleUser:RoleUser) WHERE n.id = RoleUser.role_id '
+                .'WITH n, RoleUser WHERE (n.name = $p0) RETURN n',
+            $builder->toSql()
+        );
+        self::assertSame(['Admin'], $builder->getBindings());
+    }
+
+    public function testCompilesAliasedSelfLeftJoin(): void
+    {
+        $builder = $this->builder()
+            ->from('User as u')
+            ->leftJoin('User as manager', 'u.id', '=', 'manager.manager_id')
+            ->where('User.active', true)
+            ->select(['User.name', 'u.name', 'manager.name as manager_name']);
+
+        self::assertSame(
+            'MATCH (n:User) OPTIONAL MATCH (manager:User) WHERE n.id = manager.manager_id '
+                .'WITH n, manager WHERE (n.active = $p0) '
+                .'RETURN n.name, n.name, manager.name AS manager_name',
+            $builder->toSql()
+        );
+        self::assertSame([true], $builder->getBindings());
+    }
+
+    public function testCompilesSelfLeftJoinWhenFromAliasEqualsLabel(): void
+    {
+        $builder = $this->builder()
+            ->from('User as User')
+            ->leftJoin('User as manager', 'User.id', '=', 'manager.manager_id')
+            ->where('User.active', true)
+            ->select(['User.name', 'manager.name as manager_name']);
+
+        self::assertSame(
+            'MATCH (n:User) OPTIONAL MATCH (manager:User) WHERE n.id = manager.manager_id '
+                .'WITH n, manager WHERE (n.active = $p0) '
+                .'RETURN n.name, manager.name AS manager_name',
+            $builder->toSql()
+        );
+        self::assertSame([true], $builder->getBindings());
+    }
+
+    public function testCompilesRightJoinCountStar(): void
+    {
+        $builder = $this->builder()
+            ->from('Role')
+            ->rightJoin('RoleUser', 'Role.id', '=', 'RoleUser.role_id');
+        $builder->aggregate = ['function' => 'count', 'columns' => ['*']];
+
+        self::assertSame(
+            'MATCH (RoleUser:RoleUser) OPTIONAL MATCH (n:Role) WHERE n.id = RoleUser.role_id '
+                .'RETURN count(*) AS aggregate',
+            $builder->toSql()
+        );
+    }
+
+    public function testRejectsDuplicateJoinVariable(): void
+    {
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('already used');
+
+        $this->builder()
+            ->from('Role')
+            ->leftJoin('RoleUser', 'Role.id', '=', 'RoleUser.role_id')
             ->leftJoin('RoleUser', 'Role.id', '=', 'RoleUser.role_id')
             ->toSql();
+    }
+
+    public function testRejectsDuplicateInnerJoinVariable(): void
+    {
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('already used');
+
+        $this->builder()
+            ->from('Role')
+            ->join('RoleUser', 'Role.id', '=', 'RoleUser.role_id')
+            ->join('RoleUser', 'Role.id', '=', 'RoleUser.role_id')
+            ->toSql();
+    }
+
+    public function testRejectsReusedJoinAlias(): void
+    {
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('already used');
+
+        $this->builder()
+            ->from('Role')
+            ->leftJoin('User as member', 'Role.id', '=', 'member.role_id')
+            ->leftJoin('Audit as member', 'Role.id', '=', 'member.role_id')
+            ->toSql();
+    }
+
+    public function testRejectsJoinOntoUnaliasedFromLabel(): void
+    {
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('alias on from()');
+
+        $this->builder()
+            ->from('User')
+            ->leftJoin('User as manager', 'User.id', '=', 'manager.manager_id')
+            ->toSql();
+    }
+
+    public function testRejectsJoinAliasOfDrivingVariable(): void
+    {
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('driving node');
+
+        $this->builder()
+            ->from('Role')
+            ->leftJoin('User as n', 'Role.id', '=', 'n.role_id')
+            ->toSql();
+    }
+
+    public function testRejectsSelfJoinWithoutDistinctJoinAlias(): void
+    {
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('distinct join alias');
+
+        $this->builder()
+            ->from('User as u')
+            ->leftJoin('User', 'u.id', '=', 'User.manager_id')
+            ->toSql();
+    }
+
+    public function testRejectsSelfJoinAliasEqualToLabel(): void
+    {
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('distinct join alias');
+
+        $this->builder()
+            ->from('User as u')
+            ->leftJoin('User as User', 'u.id', '=', 'User.manager_id')
+            ->toSql();
+    }
+
+    public function testRejectsSameLabelJoinedUnderTwoAliases(): void
+    {
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('already joined');
+
+        $this->builder()
+            ->from('Role')
+            ->join('User as member', 'Role.id', '=', 'member.role_id')
+            ->join('User as owner', 'Role.owner_id', '=', 'owner.id')
+            ->where('User.active', true)
+            ->toSql();
+    }
+
+    public function testCompilesTwoSelfJoinsWithDistinctAliases(): void
+    {
+        $builder = $this->builder()
+            ->from('User as u')
+            ->leftJoin('User as manager', 'u.id', '=', 'manager.manager_id')
+            ->leftJoin('User as mentor', 'u.id', '=', 'mentor.mentor_id')
+            ->where('User.active', true)
+            ->select(['User.name', 'manager.name as manager_name', 'mentor.name as mentor_name']);
+
+        self::assertSame(
+            'MATCH (n:User) OPTIONAL MATCH (manager:User) WHERE n.id = manager.manager_id '
+                .'OPTIONAL MATCH (mentor:User) WHERE n.id = mentor.mentor_id '
+                .'WITH n, manager, mentor WHERE (n.active = $p0) '
+                .'RETURN n.name, manager.name AS manager_name, mentor.name AS mentor_name',
+            $builder->toSql()
+        );
+        self::assertSame([true], $builder->getBindings());
     }
 
     public function testCompilesHasManyThroughStyleJoinAndThroughKeyAlias(): void
@@ -987,7 +1364,7 @@ final class Neo4jQueryGrammarTest extends TestCase
     }
 
     private function neo4jBuilder(): Neo4jQueryBuilder
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        {
+    {
         return new Neo4jQueryBuilder(
             $this->createMock(ConnectionInterface::class),
             new Neo4jQueryGrammar(),

@@ -85,6 +85,39 @@ final class Neo4jProcessorTest extends TestCase
         ], $results);
     }
 
+    public function testOmitsNullDrivingNodeAndKeepsScalarNulls(): void
+    {
+        $unmatched = (new Neo4jProcessor())->processSelect(
+            $this->createMock(Builder::class),
+            [(object) ['n' => null, 'pivot_user_id' => 'user-1']]
+        );
+
+        self::assertSame([
+            ['pivot_user_id' => 'user-1'],
+        ], $unmatched);
+
+        $scalars = (new Neo4jProcessor())->processSelect(
+            $this->createMock(Builder::class),
+            [(object) ['n.name' => null, 'RoleUser.user_id' => 'user-1']]
+        );
+
+        self::assertSame([
+            ['name' => null, 'RoleUser.user_id' => 'user-1'],
+        ], $scalars);
+
+        $query = $this->createMock(Builder::class);
+        $query->joins = [(object) ['table' => 'User as manager']];
+
+        $joined = (new Neo4jProcessor())->processSelect(
+            $query,
+            [(object) ['manager' => null, 'pivot_user_id' => 'user-1']]
+        );
+
+        self::assertSame([
+            ['pivot_user_id' => 'user-1'],
+        ], $joined);
+    }
+
     public function testKeepsPivotAliasesAlongsideRelatedNodeProperties(): void
     {
         $node = new Node(
