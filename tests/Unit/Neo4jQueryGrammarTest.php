@@ -602,6 +602,126 @@ final class Neo4jQueryGrammarTest extends TestCase
             ->toSql();
     }
 
+    public function testCompilesLeftJoinClosureWhereOnOptionalMatch(): void
+    {
+        $builder = $this->builder()
+            ->from('Role')
+            ->leftJoin('RoleUser', function ($join): void {
+                $join->on('Role.id', '=', 'RoleUser.role_id')
+                    ->where('RoleUser.active', '=', true);
+            })
+            ->select(['Role.*']);
+
+        self::assertSame(
+            'MATCH (n:Role) OPTIONAL MATCH (RoleUser:RoleUser) WHERE (n.id = RoleUser.role_id AND (RoleUser.active = $p0)) '
+                .'RETURN n',
+            $builder->toSql()
+        );
+        self::assertSame([true], $builder->getBindings());
+    }
+
+    public function testCompilesLeftJoinPreservedSideWhereViaWith(): void
+    {
+        $builder = $this->builder()
+            ->from('Role')
+            ->leftJoin('RoleUser', 'Role.id', '=', 'RoleUser.role_id')
+            ->where('Role.name', 'Admin')
+            ->select(['Role.*']);
+
+        self::assertSame(
+            'MATCH (n:Role) OPTIONAL MATCH (RoleUser:RoleUser) WHERE n.id = RoleUser.role_id '
+                .'WITH n, RoleUser WHERE (n.name = $p0) RETURN n',
+            $builder->toSql()
+        );
+        self::assertSame(['Admin'], $builder->getBindings());
+    }
+
+    public function testCompilesAliasedSelfLeftJoin(): void
+    {
+        $builder = $this->builder()
+            ->from('User as u')
+            ->leftJoin('User as manager', 'u.id', '=', 'manager.manager_id')
+            ->select(['u.name', 'manager.name as manager_name']);
+
+        self::assertSame(
+            'MATCH (n:User) OPTIONAL MATCH (manager:User) WHERE n.id = manager.manager_id '
+                .'RETURN n.name, manager.name AS manager_name',
+            $builder->toSql()
+        );
+    }
+
+    public function testCompilesRightJoinCountStar(): void
+    {
+        $builder = $this->builder()
+            ->from('Role')
+            ->rightJoin('RoleUser', 'Role.id', '=', 'RoleUser.role_id');
+        $builder->aggregate = ['function' => 'count', 'columns' => ['*']];
+
+        self::assertSame(
+            'MATCH (RoleUser:RoleUser) OPTIONAL MATCH (n:Role) WHERE n.id = RoleUser.role_id '
+                .'RETURN count(*) AS aggregate',
+            $builder->toSql()
+        );
+    }
+
+    public function testRejectsDuplicateJoinVariable(): void
+    {
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('already used');
+
+        $this->builder()
+            ->from('Role')
+            ->leftJoin('RoleUser', 'Role.id', '=', 'RoleUser.role_id')
+            ->leftJoin('RoleUser', 'Role.id', '=', 'RoleUser.role_id')
+            ->toSql();
+    }
+
+    public function testRejectsDuplicateInnerJoinVariable(): void
+    {
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('already used');
+
+        $this->builder()
+            ->from('Role')
+            ->join('RoleUser', 'Role.id', '=', 'RoleUser.role_id')
+            ->join('RoleUser', 'Role.id', '=', 'RoleUser.role_id')
+            ->toSql();
+    }
+
+    public function testRejectsReusedJoinAlias(): void
+    {
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('already used');
+
+        $this->builder()
+            ->from('Role')
+            ->leftJoin('User as member', 'Role.id', '=', 'member.role_id')
+            ->leftJoin('Audit as member', 'Role.id', '=', 'member.role_id')
+            ->toSql();
+    }
+
+    public function testRejectsJoinOntoUnaliasedFromLabel(): void
+    {
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('alias on from()');
+
+        $this->builder()
+            ->from('User')
+            ->leftJoin('User as manager', 'User.id', '=', 'manager.manager_id')
+            ->toSql();
+    }
+
+    public function testRejectsJoinAliasOfDrivingVariable(): void
+    {
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('driving node');
+
+        $this->builder()
+            ->from('Role')
+            ->leftJoin('User as n', 'Role.id', '=', 'n.role_id')
+            ->toSql();
+    }
+
     public function testCompilesHasManyThroughStyleJoinAndThroughKeyAlias(): void
     {
         $builder = $this->builder()
@@ -1154,7 +1274,7 @@ final class Neo4jQueryGrammarTest extends TestCase
     }
 
     private function neo4jBuilder(): Neo4jQueryBuilder
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        {
+    {
         return new Neo4jQueryBuilder(
             $this->createMock(ConnectionInterface::class),
             new Neo4jQueryGrammar(),

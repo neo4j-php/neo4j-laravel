@@ -23,6 +23,9 @@ use WikibaseSolutions\CypherDSL\Types\PropertyTypes\BooleanType;
  *   - leftJoin()       -> MATCH (n) OPTIONAL MATCH (join) WHERE <ON>
  *   - rightJoin()      -> MATCH (join) OPTIONAL MATCH (n) WHERE <ON>
  *                        (single right join alone; not mixed with other joins)
+ *                        count(*) on a right join stays count(*) so null n rows count
+ *                        Join variables must be unique, must not be "n", and must
+ *                        not hide an unaliased from() label (self-joins use from('User as u'))
  *   - matchRelationship(type, relatedLabel) -> MATCH (n:Label)-[rel:Type]-(related:Related)
  *     (single relationship; direction markers Type> / <Type; optional WHERE-only related-node closure)
  *     Default RETURN is n (select rel/related explicitly for graph rows)
@@ -246,6 +249,8 @@ final class Neo4jQueryGrammar extends Grammar
      *
      * Primary from()/alias mappings are never overwritten when the related
      * label matches the from label — use the related alias for the other node.
+     * Joins that would hide an unaliased from() label, reuse a Cypher variable,
+     * or alias the join as "n" throw instead of compiling.
      *
      * @return array<string, string>
      */
@@ -257,8 +262,11 @@ final class Neo4jQueryGrammar extends Grammar
             $from['name'] => 'n',
         ];
 
+        $usedVariables = ['n' => true];
+
         if ($from['alias'] !== null) {
             $map[$from['alias']] = 'n';
+            $usedVariables[$from['alias']] = true;
         }
 
         foreach ($query->joins ?? [] as $join) {
@@ -274,6 +282,8 @@ final class Neo4jQueryGrammar extends Grammar
             $table = $this->parseTableName($join->table);
             $variable = $table['alias'] ?? $table['name'];
             $this->assertIdentifier($variable);
+            $this->assertJoinVariable($variable, $usedVariables, $map, $table['name']);
+            $usedVariables[$variable] = true;
             $map[$table['name']] = $variable;
 
             if ($table['alias'] !== null) {
@@ -338,17 +348,14 @@ final class Neo4jQueryGrammar extends Grammar
         }
 
         $patterns = ['(n:'.$from['name'].')'];
-        $seen = ['n' => true];
 
         foreach ($query->joins ?? [] as $join) {
-            $table = $this->parseTableName($join->table);
-            $variable = $table['alias'] ?? $table['name'];
-
-            if (isset($seen[$variable])) {
-                continue;
+            if (! is_string($join->table)) {
+                throw new RuntimeException('Subquery and expression joins are not supported on Neo4j Query Builder.');
             }
 
-            $seen[$variable] = true;
+            $table = $this->parseTableName($join->table);
+            $variable = $table['alias'] ?? $table['name'];
             $patterns[] = "({$variable}:{$table['name']})";
         }
 
@@ -514,6 +521,7 @@ final class Neo4jQueryGrammar extends Grammar
         foreach ($query->joins ?? [] as $join) {
             if ($this->normalizeJoinType((string) $join->type) === 'right') {
                 $rightJoin = $join;
+
                 break;
             }
         }
@@ -603,7 +611,13 @@ final class Neo4jQueryGrammar extends Grammar
         $function = strtolower((string) $aggregate['function']);
         $this->assertIdentifier($function);
 
-        $argument = $this->compileAggregateArgument($function, $aggregate['columns'], (bool) $query->distinct, $variables);
+        $argument = $this->compileAggregateArgument(
+            $function,
+            $aggregate['columns'],
+            (bool) $query->distinct,
+            $variables,
+            $this->drivingNodeCanBeNull($query),
+        );
         $aggregateReturn = "{$function}({$argument}) AS aggregate";
 
         if (! empty($query->groups) || ! empty($query->havings)) {
@@ -631,8 +645,13 @@ final class Neo4jQueryGrammar extends Grammar
      * @param  array<int, mixed>  $columns
      * @param  array<string, string>  $variables
      */
-    private function compileAggregateArgument(string $function, array $columns, bool $distinct, array $variables = []): string
-    {
+    private function compileAggregateArgument(
+        string $function,
+        array $columns,
+        bool $distinct,
+        array $variables = [],
+        bool $drivingNodeCanBeNull = false,
+    ): string {
         $column = $columns[0] ?? '*';
 
         if ($this->isExpression($column)) {
@@ -641,16 +660,69 @@ final class Neo4jQueryGrammar extends Grammar
             if ($function !== 'count') {
                 throw new RuntimeException("Aggregate {$function}() requires a column on Neo4j Query Builder.");
             }
-            $argument = 'n';
+
+            // count(n) skips rows where the driving node is null. rightJoin
+            // preserves the other side, so unmatched rows must use count(*).
+            $argument = $drivingNodeCanBeNull ? '*' : 'n';
         } else {
             $argument = $this->compileColumn((string) $column, $variables)->toQuery();
         }
 
-        if ($distinct && $argument !== 'n') {
+        if ($distinct && $argument !== 'n' && $argument !== '*') {
             return 'DISTINCT '.$argument;
         }
 
         return $argument;
+    }
+
+    /**
+     * rightJoin binds from() with OPTIONAL MATCH, so n is null on unmatched rows.
+     */
+    private function drivingNodeCanBeNull(Builder $query): bool
+    {
+        foreach ($query->joins ?? [] as $join) {
+            if ($this->normalizeJoinType((string) $join->type) === 'right') {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Reject join variables Neo4j would reject or that would hide the driving node.
+     *
+     * @param  array<string, true>  $usedVariables
+     * @param  array<string, string>  $map
+     */
+    private function assertJoinVariable(string $variable, array $usedVariables, array $map, string $label): void
+    {
+        if ($variable === 'n') {
+            throw new RuntimeException(
+                'Join alias "n" collides with the driving node variable. Choose a different alias.'
+            );
+        }
+
+        if (isset($usedVariables[$variable])) {
+            throw new RuntimeException(
+                "Join variable \"{$variable}\" is already used. Alias each join to a distinct Cypher variable."
+            );
+        }
+
+        if (($map[$label] ?? null) !== 'n') {
+            return;
+        }
+
+        foreach ($map as $key => $bound) {
+            if ($key !== '' && $key !== $label && $bound === 'n') {
+                return;
+            }
+        }
+
+        throw new RuntimeException(
+            'Joining the from() label requires an alias on from(), for example from(\'User as u\'), '
+            .'and the join must reference that alias.'
+        );
     }
 
     /**
@@ -670,6 +742,7 @@ final class Neo4jQueryGrammar extends Grammar
             foreach ($query->groups ?? [] as $group) {
                 if (! $this->isExpression($group) && $this->propertyName((string) $group) === $alias) {
                     $alreadyGrouped = true;
+
                     break;
                 }
             }

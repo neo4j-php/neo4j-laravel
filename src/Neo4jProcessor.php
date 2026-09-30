@@ -29,6 +29,10 @@ final class Neo4jProcessor extends Processor
             // Connection::select() returns stdClass (PDO::FETCH_OBJ shape);
             // unit tests and older call sites may still pass CypherMap rows.
             foreach ($row as $key => $value) {
+                if ($value === null && $this->isWholeNodeColumn((string) $key, $query)) {
+                    continue;
+                }
+
                 if ($value instanceof HasPropertiesInterface) {
                     $prefix = $key === 'n' ? '' : $key.'.';
 
@@ -55,6 +59,39 @@ final class Neo4jProcessor extends Processor
         }
 
         return $processed;
+    }
+
+    /**
+     * Whole-node RETURN columns (n, or a join variable) are null when an outer
+     * join misses. Scalar columns such as n.name still project as null.
+     */
+    private function isWholeNodeColumn(string $key, Builder $query): bool
+    {
+        if ($key === 'n') {
+            return true;
+        }
+
+        foreach ($query->joins ?? [] as $join) {
+            $table = $join->table ?? null;
+
+            if (! is_string($table) || $table === '') {
+                continue;
+            }
+
+            if (preg_match('/^(.+?)\s+as\s+(.+)$/i', $table, $matches) === 1) {
+                if (trim($matches[2]) === $key) {
+                    return true;
+                }
+
+                continue;
+            }
+
+            if ($table === $key) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private function normalizeValue(mixed $value): mixed
