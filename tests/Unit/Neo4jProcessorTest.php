@@ -104,6 +104,18 @@ final class Neo4jProcessorTest extends TestCase
         self::assertSame([
             ['name' => null, 'RoleUser.user_id' => 'user-1'],
         ], $scalars);
+
+        $query = $this->createMock(Builder::class);
+        $query->joins = [(object) ['table' => 'User as manager']];
+
+        $joined = (new Neo4jProcessor())->processSelect(
+            $query,
+            [(object) ['manager' => null, 'pivot_user_id' => 'user-1']]
+        );
+
+        self::assertSame([
+            ['pivot_user_id' => 'user-1'],
+        ], $joined);
     }
 
     public function testKeepsPivotAliasesAlongsideRelatedNodeProperties(): void

@@ -250,7 +250,8 @@ final class Neo4jQueryGrammar extends Grammar
      * Primary from()/alias mappings are never overwritten when the related
      * label matches the from label — use the related alias for the other node.
      * Joins that would hide an unaliased from() label, reuse a Cypher variable,
-     * or alias the join as "n" throw instead of compiling.
+     * or alias the join as "n" throw instead of compiling. A self-join keeps the
+     * from() label mapped to "n" and records only the join alias.
      *
      * @return array<string, string>
      */
@@ -282,11 +283,14 @@ final class Neo4jQueryGrammar extends Grammar
             $table = $this->parseTableName($join->table);
             $variable = $table['alias'] ?? $table['name'];
             $this->assertIdentifier($variable);
-            $this->assertJoinVariable($variable, $usedVariables, $map, $table['name']);
+            $this->assertJoinVariable($variable, $usedVariables, $map, $table, $from['alias'] !== null);
             $usedVariables[$variable] = true;
-            $map[$table['name']] = $variable;
 
-            if ($table['alias'] !== null) {
+            if (($map[$table['name']] ?? null) !== 'n') {
+                $map[$table['name']] = $variable;
+            }
+
+            if ($table['alias'] !== null && ($map[$table['alias']] ?? null) !== 'n') {
                 $map[$table['alias']] = $variable;
             }
         }
@@ -692,10 +696,14 @@ final class Neo4jQueryGrammar extends Grammar
     /**
      * Reject join variables Neo4j would reject or that would hide the driving node.
      *
+     * A self-join is allowed once from() has an alias, including from('User as User').
+     * The from() label stays mapped to n; only the join alias is added.
+     *
      * @param  array<string, true>  $usedVariables
      * @param  array<string, string>  $map
+     * @param  array{name: string, alias: string|null}  $table
      */
-    private function assertJoinVariable(string $variable, array $usedVariables, array $map, string $label): void
+    private function assertJoinVariable(string $variable, array $usedVariables, array $map, array $table, bool $fromHasAlias): void
     {
         if ($variable === 'n') {
             throw new RuntimeException(
@@ -709,20 +717,18 @@ final class Neo4jQueryGrammar extends Grammar
             );
         }
 
-        if (($map[$label] ?? null) !== 'n') {
-            return;
+        $alias = $table['alias'];
+        if ($alias !== null && $alias !== $table['name'] && ($map[$alias] ?? null) === 'n') {
+            throw new RuntimeException(
+                "Join alias \"{$alias}\" collides with the from() label. Choose a different alias."
+            );
         }
 
-        foreach ($map as $key => $bound) {
-            if ($key !== '' && $key !== $label && $bound === 'n') {
-                return;
-            }
+        if (($map[$table['name']] ?? null) === 'n' && ! $fromHasAlias) {
+            throw new RuntimeException(
+                'Joining the from() label requires an alias on from(), for example from(\'User as u\').'
+            );
         }
-
-        throw new RuntimeException(
-            'Joining the from() label requires an alias on from(), for example from(\'User as u\'), '
-            .'and the join must reference that alias.'
-        );
     }
 
     /**

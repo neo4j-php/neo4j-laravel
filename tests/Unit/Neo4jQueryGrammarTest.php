@@ -641,13 +641,33 @@ final class Neo4jQueryGrammarTest extends TestCase
         $builder = $this->builder()
             ->from('User as u')
             ->leftJoin('User as manager', 'u.id', '=', 'manager.manager_id')
-            ->select(['u.name', 'manager.name as manager_name']);
+            ->where('User.active', true)
+            ->select(['User.name', 'u.name', 'manager.name as manager_name']);
 
         self::assertSame(
             'MATCH (n:User) OPTIONAL MATCH (manager:User) WHERE n.id = manager.manager_id '
+                .'WITH n, manager WHERE (n.active = $p0) '
+                .'RETURN n.name, n.name, manager.name AS manager_name',
+            $builder->toSql()
+        );
+        self::assertSame([true], $builder->getBindings());
+    }
+
+    public function testCompilesSelfLeftJoinWhenFromAliasEqualsLabel(): void
+    {
+        $builder = $this->builder()
+            ->from('User as User')
+            ->leftJoin('User as manager', 'User.id', '=', 'manager.manager_id')
+            ->where('User.active', true)
+            ->select(['User.name', 'manager.name as manager_name']);
+
+        self::assertSame(
+            'MATCH (n:User) OPTIONAL MATCH (manager:User) WHERE n.id = manager.manager_id '
+                .'WITH n, manager WHERE (n.active = $p0) '
                 .'RETURN n.name, manager.name AS manager_name',
             $builder->toSql()
         );
+        self::assertSame([true], $builder->getBindings());
     }
 
     public function testCompilesRightJoinCountStar(): void
