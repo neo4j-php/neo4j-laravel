@@ -742,6 +742,60 @@ final class Neo4jQueryGrammarTest extends TestCase
             ->toSql();
     }
 
+    public function testRejectsSelfJoinWithoutDistinctJoinAlias(): void
+    {
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('distinct join alias');
+
+        $this->builder()
+            ->from('User as u')
+            ->leftJoin('User', 'u.id', '=', 'User.manager_id')
+            ->toSql();
+    }
+
+    public function testRejectsSelfJoinAliasEqualToLabel(): void
+    {
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('distinct join alias');
+
+        $this->builder()
+            ->from('User as u')
+            ->leftJoin('User as User', 'u.id', '=', 'User.manager_id')
+            ->toSql();
+    }
+
+    public function testRejectsSameLabelJoinedUnderTwoAliases(): void
+    {
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('already joined');
+
+        $this->builder()
+            ->from('Role')
+            ->join('User as member', 'Role.id', '=', 'member.role_id')
+            ->join('User as owner', 'Role.owner_id', '=', 'owner.id')
+            ->where('User.active', true)
+            ->toSql();
+    }
+
+    public function testCompilesTwoSelfJoinsWithDistinctAliases(): void
+    {
+        $builder = $this->builder()
+            ->from('User as u')
+            ->leftJoin('User as manager', 'u.id', '=', 'manager.manager_id')
+            ->leftJoin('User as mentor', 'u.id', '=', 'mentor.mentor_id')
+            ->where('User.active', true)
+            ->select(['User.name', 'manager.name as manager_name', 'mentor.name as mentor_name']);
+
+        self::assertSame(
+            'MATCH (n:User) OPTIONAL MATCH (manager:User) WHERE n.id = manager.manager_id '
+                .'OPTIONAL MATCH (mentor:User) WHERE n.id = mentor.mentor_id '
+                .'WITH n, manager, mentor WHERE (n.active = $p0) '
+                .'RETURN n.name, manager.name AS manager_name, mentor.name AS mentor_name',
+            $builder->toSql()
+        );
+        self::assertSame([true], $builder->getBindings());
+    }
+
     public function testCompilesHasManyThroughStyleJoinAndThroughKeyAlias(): void
     {
         $builder = $this->builder()

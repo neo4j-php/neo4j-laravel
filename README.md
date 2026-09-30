@@ -168,7 +168,8 @@ Current limits:
 - Full outer joins are not supported
 - `groupBy` / `having` cannot be combined with joins yet
 - Each join needs its own Cypher variable. Repeating a label with no alias, reusing an alias, or aliasing a join as `n` throws
-- A self-join needs an alias on `from()`, for example `from('User as u')->leftJoin('User as manager', 'u.id', '=', 'manager.manager_id')`. The label and that alias both refer to the driving node
+- A self-join needs an alias on `from()` and a distinct alias on the join, for example `from('User as u')->leftJoin('User as manager', 'u.id', '=', 'manager.manager_id')`. The label and the `from()` alias both refer to the driving node. `leftJoin('User')` and `leftJoin('User as User')` throw
+- The same label cannot be joined twice under different aliases (`User as member` and `User as owner`). The bare label would point at only one of them
 - `count(*)` on a `rightJoin` compiles to Cypher `count(*)`, so unmatched `from()` rows are counted
 - An unmatched `rightJoin` does not expand `from().*` into null columns. Select scalar columns such as `Role.name` to project those nulls
 

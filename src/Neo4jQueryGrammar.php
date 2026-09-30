@@ -25,7 +25,9 @@ use WikibaseSolutions\CypherDSL\Types\PropertyTypes\BooleanType;
  *                        (single right join alone; not mixed with other joins)
  *                        count(*) on a right join stays count(*) so null n rows count
  *                        Join variables must be unique, must not be "n", and must
- *                        not hide an unaliased from() label (self-joins use from('User as u'))
+ *                        not hide the from() label. A self-join needs from('User as u')
+ *                        and a distinct join alias. The same label cannot be joined
+ *                        twice under different aliases
  *   - matchRelationship(type, relatedLabel) -> MATCH (n:Label)-[rel:Type]-(related:Related)
  *     (single relationship; direction markers Type> / <Type; optional WHERE-only related-node closure)
  *     Default RETURN is n (select rel/related explicitly for graph rows)
@@ -250,8 +252,10 @@ final class Neo4jQueryGrammar extends Grammar
      * Primary from()/alias mappings are never overwritten when the related
      * label matches the from label — use the related alias for the other node.
      * Joins that would hide an unaliased from() label, reuse a Cypher variable,
-     * or alias the join as "n" throw instead of compiling. A self-join keeps the
-     * from() label mapped to "n" and records only the join alias.
+     * alias the join as "n", or join the from() label without a distinct alias
+     * throw instead of compiling. A second join of a label that already maps to
+     * another variable throws too. A self-join keeps the from() label mapped to
+     * "n" and records only the join alias.
      *
      * @return array<string, string>
      */
@@ -696,8 +700,9 @@ final class Neo4jQueryGrammar extends Grammar
     /**
      * Reject join variables Neo4j would reject or that would hide the driving node.
      *
-     * A self-join is allowed once from() has an alias, including from('User as User').
-     * The from() label stays mapped to n; only the join alias is added.
+     * A self-join is allowed once from() has an alias, including from('User as User'),
+     * and the join itself has a different alias. The from() label stays mapped to n;
+     * only the join alias is added. Joining one label under two aliases throws.
      *
      * @param  array<string, true>  $usedVariables
      * @param  array<string, string>  $map
@@ -724,9 +729,26 @@ final class Neo4jQueryGrammar extends Grammar
             );
         }
 
-        if (($map[$table['name']] ?? null) === 'n' && ! $fromHasAlias) {
+        if (($map[$table['name']] ?? null) === 'n') {
+            if (! $fromHasAlias) {
+                throw new RuntimeException(
+                    'Joining the from() label requires an alias on from(), for example from(\'User as u\').'
+                );
+            }
+
+            if ($alias === null || $alias === $table['name'] || ($map[$alias] ?? null) === 'n') {
+                throw new RuntimeException(
+                    'Joining the from() label requires a distinct join alias, for example leftJoin(\'User as manager\', ...).'
+                );
+            }
+
+            return;
+        }
+
+        $existing = $map[$table['name']] ?? null;
+        if (is_string($existing) && $existing !== $variable) {
             throw new RuntimeException(
-                'Joining the from() label requires an alias on from(), for example from(\'User as u\').'
+                "Label \"{$table['name']}\" is already joined as \"{$existing}\". A label can only map to one Cypher variable."
             );
         }
     }
