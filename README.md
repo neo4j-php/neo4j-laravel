@@ -107,7 +107,7 @@ Optional:
 | --- | --- |
 | [`barryvdh/laravel-debugbar`](https://github.com/barryvdh/laravel-debugbar) or [`fruitcake/laravel-debugbar`](https://github.com/fruitcake/laravel-debugbar) (v4+) | Show Cypher in Debugbar's Queries tab |
 
-> CI currently runs unit and integration tests on **PHP 8.2–8.4 with Laravel 11**. Composer allows Laravel 12 and 13 via Illuminate constraints.
+> CI currently runs unit and integration tests on **PHP 8.2–8.4 with Laravel 11 and 12**. Composer also allows Laravel 13 via Illuminate constraints. Laravel 11 installs in CI with Composer’s advisory blocking relaxed because 11.x is EOL and unpatched.
 
 ---
 

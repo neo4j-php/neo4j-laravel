@@ -21,8 +21,8 @@
     "wikibase-solutions/php-cypher-dsl": "^5.0"
   },
   "require-dev": {
-    "orchestra/testbench": "^9.0 || ^10.0",
-    "phpunit/phpunit": "^10.5",
+    "orchestra/testbench": "^9.0 || ^10.0 || ^11.0",
+    "phpunit/phpunit": "^10.5 || ^11.5",
     "psalm/plugin-laravel": "^2.12",
     "friendsofphp/php-cs-fixer": "^3.69",
     "barryvdh/laravel-debugbar": "^3.15",
