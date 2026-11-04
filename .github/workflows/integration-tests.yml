@@ -21,7 +21,9 @@ jobs:
       max-parallel: 10
       matrix:
         php: ["8.2", "8.3", "8.4"]
-        laravel: ["11.0"]
+        # Laravel 11 is EOL and blocked by Composer security advisories unless
+        # audit.block-insecure is disabled (handled in setup-laravel-env.bash).
+        laravel: ["11.0", "12.0"]
 
     services:
       neo4j:
