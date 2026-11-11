@@ -21,6 +21,8 @@ function install-specified-laravel-version {
     rm composer.lock || true
     rm -Rf vendor || true
     sed -i 's/\^11.0 || \^12.0/\^'$laravel_version'/g' composer.json
+    # Composer refuses to install Laravel versions with published security advisories
+    composer config policy.advisories.block false
     composer install --ignore-platform-req=php
 }
 
