@@ -81,6 +81,12 @@ final class Neo4jConnection extends Connection
      * Same as the stock implementation, except it commits the Neo4j
      * transaction instead of calling PDO::commit().
      *
+     * Laravel has hooks for beginning (createTransaction()) and rolling back
+     * (performRollBack()) a transaction, but none for committing: the stock
+     * transaction() calls $this->getPdo()->commit() directly. Copying the loop
+     * is the only way to commit through Neo4j. Keep it in sync with
+     * ManagesTransactions::transaction() when upgrading Laravel.
+     *
      * @param  int  $attempts
      *
      * @throws Throwable
