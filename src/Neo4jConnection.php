@@ -102,10 +102,7 @@ final class Neo4jConnection extends Connection
             $levelBeingCommitted = $this->transactions;
 
             try {
-                if ($this->transactions == 1) {
-                    $this->fireConnectionEvent('committing');
-                    $this->commitNeo4jTransaction();
-                }
+                $this->commitIfOutermost();
 
                 $this->transactions = max(0, $this->transactions - 1);
             } catch (Throwable $e) {
@@ -162,10 +159,7 @@ final class Neo4jConnection extends Connection
     #[\Override]
     public function commit(): void
     {
-        if ($this->transactions == 1) {
-            $this->fireConnectionEvent('committing');
-            $this->commitNeo4jTransaction();
-        }
+        $this->commitIfOutermost();
 
         [$levelBeingCommitted, $this->transactions] = [
             $this->transactions,
@@ -212,6 +206,17 @@ final class Neo4jConnection extends Connection
         }
 
         return parent::causedByConcurrencyError($e);
+    }
+
+    /**
+     * Nested levels share the outer Neo4j transaction, so only the outermost level commits it.
+     */
+    private function commitIfOutermost(): void
+    {
+        if ($this->transactions == 1) {
+            $this->fireConnectionEvent('committing');
+            $this->commitNeo4jTransaction();
+        }
     }
 
     private function commitNeo4jTransaction(): void
