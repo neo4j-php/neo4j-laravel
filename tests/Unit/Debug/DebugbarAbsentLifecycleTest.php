@@ -8,6 +8,7 @@ use Laudis\Neo4j\Databags\SummarizedResult;
 use Mockery;
 use Neo4j\Neo4jLaravel\Neo4jConnection;
 use Neo4j\Neo4jLaravel\Neo4jServiceProvider;
+use Neo4j\Neo4jLaravel\Tests\Support\StubsConnectionSession;
 use Orchestra\Testbench\TestCase;
 
 /**
@@ -15,6 +16,8 @@ use Orchestra\Testbench\TestCase;
  */
 class DebugbarAbsentLifecycleTest extends TestCase
 {
+    use StubsConnectionSession;
+
     protected function getPackageProviders($app): array
     {
         return [Neo4jServiceProvider::class];
@@ -42,9 +45,10 @@ class DebugbarAbsentLifecycleTest extends TestCase
     public function test_neo4j_connection_works_without_debugbar(): void
     {
         $client = Mockery::mock(ClientInterface::class);
+        $session = $this->stubConnectionSession($client, 'neo4j');
         $summary = null;
         $result = new SummarizedResult($summary);
-        $client->shouldReceive('readTransaction')->once()->andReturn($result);
+        $session->shouldReceive('readTransaction')->once()->andReturn($result);
         $this->app->instance(\Laudis\Neo4j\Client::class, $client);
         $this->app->instance(ClientInterface::class, $client);
         $this->app->make('db')->purge('neo4j');
@@ -57,6 +61,7 @@ class DebugbarAbsentLifecycleTest extends TestCase
         /** @var Neo4jConnection $connection */
         $connection = $this->app->make('db')->connection('neo4j');
         $this->assertInstanceOf(Neo4jConnection::class, $connection);
+        $connection->enableQueryLog();
 
         $connection->read('MATCH (n) RETURN n', []);
 
