@@ -95,4 +95,104 @@ final class Neo4jSchemaGrammarTest extends TestCase
             $grammar->compileDropConstraint('person_email_unique')
         );
     }
+
+    public function testCompilesCreateAsUniqueConstraintForAutoIncrementColumns(): void
+    {
+        $blueprint = new Blueprint('migrations', function (Blueprint $table): void {
+            $table->increments('id');
+            $table->string('migration');
+            $table->integer('batch');
+        });
+        $blueprint->create();
+
+        $statements = (new Neo4jSchemaGrammar())->compileCreate($blueprint, new Fluent(['name' => 'create']));
+
+        self::assertSame([
+            'CREATE CONSTRAINT migrations_id_primary IF NOT EXISTS FOR (n:migrations) REQUIRE n.id IS UNIQUE',
+        ], $statements);
+    }
+
+    public function testCompilesUniqueConstraint(): void
+    {
+        $blueprint = new Blueprint('User');
+
+        self::assertSame(
+            'CREATE CONSTRAINT user_email_unique IF NOT EXISTS FOR (n:User) REQUIRE n.email IS UNIQUE',
+            (new Neo4jSchemaGrammar())->compileUnique($blueprint, new Fluent([
+                'index' => 'user_email_unique',
+                'columns' => ['email'],
+            ]))
+        );
+    }
+
+    public function testCompilesCompositeUniqueConstraint(): void
+    {
+        $blueprint = new Blueprint('User');
+
+        self::assertSame(
+            'CREATE CONSTRAINT user_org_email_unique IF NOT EXISTS FOR (n:User) REQUIRE (n.org_id, n.email) IS UNIQUE',
+            (new Neo4jSchemaGrammar())->compileUnique($blueprint, new Fluent([
+                'index' => 'user_org_email_unique',
+                'columns' => ['org_id', 'email'],
+            ]))
+        );
+    }
+
+    public function testCompilesRangeIndex(): void
+    {
+        $blueprint = new Blueprint('User');
+
+        self::assertSame(
+            'CREATE RANGE INDEX user_name_index IF NOT EXISTS FOR (n:User) ON (n.name)',
+            (new Neo4jSchemaGrammar())->compileIndex($blueprint, new Fluent([
+                'index' => 'user_name_index',
+                'columns' => ['name'],
+            ]))
+        );
+    }
+
+    public function testCompilesFulltextIndex(): void
+    {
+        $blueprint = new Blueprint('Article');
+
+        self::assertSame(
+            'CREATE FULLTEXT INDEX article_body_fulltext IF NOT EXISTS FOR (n:Article) ON EACH [n.body]',
+            (new Neo4jSchemaGrammar())->compileFulltext($blueprint, new Fluent([
+                'index' => 'article_body_fulltext',
+                'columns' => ['body'],
+            ]))
+        );
+    }
+
+    public function testCompilesDropColumnAsRemoveProperty(): void
+    {
+        $blueprint = new Blueprint('User');
+
+        self::assertSame([
+            'MATCH (n:User) WHERE n.nickname IS NOT NULL REMOVE n.nickname',
+        ], (new Neo4jSchemaGrammar())->compileDropColumn($blueprint, new Fluent([
+            'columns' => ['nickname'],
+        ])));
+    }
+
+    public function testForeignKeysAreNoOps(): void
+    {
+        $blueprint = new Blueprint('User');
+        $grammar = new Neo4jSchemaGrammar();
+
+        self::assertNull($grammar->compileForeign($blueprint, new Fluent()));
+        self::assertNull($grammar->compileDropForeign($blueprint, new Fluent()));
+    }
+
+    public function testRejectsInvalidLabelOnCreate(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+
+        $blueprint = new Blueprint('bad-label', function (Blueprint $table): void {
+            $table->increments('id');
+        });
+        $blueprint->create();
+
+        (new Neo4jSchemaGrammar())->compileCreate($blueprint, new Fluent(['name' => 'create']));
+    }
 }

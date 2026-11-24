@@ -4,6 +4,7 @@ namespace Neo4j\Neo4jLaravel;
 
 use Illuminate\Database\Query\Builder;
 use Illuminate\Database\Query\Processors\Processor;
+use Laudis\Neo4j\Contracts\CypherSequence;
 use Laudis\Neo4j\Contracts\HasPropertiesInterface;
 use Laudis\Neo4j\Types\DateTime;
 use Laudis\Neo4j\Types\DateTimeZoneId;
@@ -15,6 +16,94 @@ use Laudis\Neo4j\Types\Node;
  */
 final class Neo4jProcessor extends Processor
 {
+    /**
+     * @param  array  $results
+     * @return list<array{name: string, schema: null, size: null, comment: null, collation: null, engine: null}>
+     */
+    #[\Override]
+    public function processTables($results)
+    {
+        return array_map(function ($result) {
+            $result = (object) $result;
+
+            return [
+                'name' => (string) $result->name,
+                'schema' => null,
+                'size' => null,
+                'comment' => null,
+                'collation' => null,
+                'engine' => null,
+            ];
+        }, $results);
+    }
+
+    /**
+     * @param  array  $results
+     * @return list<array{name: string, type: string|null, type_name: string|null, nullable: bool, default: mixed, auto_increment: bool, comment: string|null, generation: null}>
+     */
+    #[\Override]
+    public function processColumns($results)
+    {
+        return array_map(function ($result) {
+            $result = (object) $result;
+            $types = $result->type ?? null;
+            $typeName = null;
+
+            if ($types instanceof CypherSequence) {
+                $types = $types->toArray();
+            }
+
+            if (is_array($types) && $types !== []) {
+                $typeName = implode('|', array_map('strval', $types));
+            } elseif (is_string($types)) {
+                $typeName = $types;
+            }
+
+            return [
+                'name' => (string) $result->name,
+                'type' => $typeName,
+                'type_name' => $typeName,
+                'nullable' => (bool) ($result->nullable ?? true),
+                'default' => $result->default ?? null,
+                'auto_increment' => false,
+                'comment' => $result->comment ?? null,
+                'generation' => null,
+            ];
+        }, $results);
+    }
+
+    /**
+     * @param  array  $results
+     * @return list<array{name: string, columns: list<string>, type: string, unique: bool, primary: bool}>
+     */
+    #[\Override]
+    public function processIndexes($results)
+    {
+        return array_map(function ($result) {
+            $result = (object) $result;
+            $properties = $result->properties ?? [];
+
+            if ($properties instanceof CypherSequence) {
+                $properties = $properties->toArray();
+            }
+
+            if (! is_array($properties)) {
+                $properties = $properties === null ? [] : [$properties];
+            }
+
+            $type = strtolower((string) ($result->type ?? 'range'));
+            $unique = (bool) ($result->unique ?? false);
+
+            return [
+                'name' => (string) $result->name,
+                'columns' => array_values(array_map('strval', $properties)),
+                'type' => $type,
+                'unique' => $unique,
+                'primary' => $unique,
+            ];
+        }, $results);
+    }
+
     /**
      * @param  iterable<int, mixed>  $results
      */
