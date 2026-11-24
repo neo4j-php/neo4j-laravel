@@ -5,7 +5,6 @@ namespace Neo4j\Neo4jLaravel;
 use DateTimeInterface;
 use Illuminate\Database\Connection;
 use Illuminate\Database\Events\QueryExecuted;
-use Illuminate\Database\Query\Grammars\Grammar as QueryGrammar;
 use Illuminate\Database\Query\Processors\Processor;
 use Illuminate\Database\Schema\Grammars\Grammar as SchemaGrammar;
 use Laudis\Neo4j\Contracts\ClientInterface;
@@ -17,9 +16,9 @@ use Laudis\Neo4j\Types\CypherMap;
 use LogicException;
 use Neo4j\Neo4jLaravel\Debug\CapturingUnmanagedTransaction;
 use Neo4j\Neo4jLaravel\Decorators\LaravelNeo4jClient;
+use Neo4j\Neo4jLaravel\Schema\Neo4jBuilder;
 use PDO;
 use Throwable;
-
 
 /**
  * @psalm-suppress PropertyNotSetInConstructor
@@ -614,6 +613,19 @@ final class Neo4jConnection extends Connection
     protected function getDefaultSchemaGrammar()
     {
         return new Neo4jSchemaGrammar();
+    }
+
+    /**
+     * Get a schema builder instance for the connection.
+     */
+    #[\Override]
+    public function getSchemaBuilder(): Neo4jBuilder
+    {
+        if ($this->schemaGrammar === null) {
+            $this->useDefaultSchemaGrammar();
+        }
+
+        return new Neo4jBuilder($this);
     }
 
     /**
