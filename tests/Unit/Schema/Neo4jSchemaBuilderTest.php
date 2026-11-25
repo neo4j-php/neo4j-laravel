@@ -13,12 +13,13 @@ use Laudis\Neo4j\Databags\SummaryCounters;
 use Laudis\Neo4j\Enum\ConnectionProtocol;
 use Laudis\Neo4j\Enum\QueryTypeEnum;
 use Laudis\Neo4j\Types\CypherList;
+use InvalidArgumentException;
 use Neo4j\Neo4jLaravel\Neo4jConnection;
+use Neo4j\Neo4jLaravel\Schema\Neo4jBuilder;
 use Neo4j\Neo4jLaravel\Schema\Neo4jSchemaBuilder;
 use Neo4j\Neo4jLaravel\Tests\TestCase;
 use PHPUnit\Framework\MockObject\MockObject;
 use Psr\Http\Message\UriInterface;
-use RuntimeException;
 
 final class Neo4jSchemaBuilderTest extends TestCase
 {
@@ -28,6 +29,7 @@ final class Neo4jSchemaBuilderTest extends TestCase
     public function testNodeBuildsUniqueAndIndexStatements(): void
     {
         $builder = $this->connection()->getSchemaBuilder();
+        self::assertInstanceOf(Neo4jBuilder::class, $builder);
         self::assertInstanceOf(Neo4jSchemaBuilder::class, $builder);
 
         $builder->node('Person', function ($node): void {
@@ -52,10 +54,10 @@ final class Neo4jSchemaBuilderTest extends TestCase
         ], $this->statements);
     }
 
-    public function testCreateTableIsRejected(): void
+    public function testCreateWithoutSchemaObjectsIsRejected(): void
     {
-        $this->expectException(RuntimeException::class);
-        $this->expectExceptionMessage('Schema::create() is not supported for Neo4j');
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('requires at least one primary, unique, index, or fulltext');
 
         $this->connection()->getSchemaBuilder()->create('people', function (): void {
         });
