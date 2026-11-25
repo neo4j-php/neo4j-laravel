@@ -160,8 +160,9 @@ final class Neo4jSchemaGrammar extends Grammar
 
     public function compileDrop(Blueprint $blueprint, Fluent $command): string
     {
-        // Neo4jBuilder::drop() performs multi-step cleanup; Blueprint::drop() still
-        // expects a compiler. Deleting nodes here is the safe fallback statement.
+        // Neo4jBuilder::drop() performs multi-step cleanup (constraints, indexes, nodes).
+        // Blueprint::drop() still expects a compiler; this is the fallback when the
+        // blueprint path is used instead of Neo4jBuilder::drop().
         return $this->compileDeleteNodes($this->label($blueprint));
     }
 
@@ -424,7 +425,8 @@ CYPHER,
 
     private function label(Blueprint $blueprint): string
     {
-        $label = $blueprint->getTable();
+        // Match Laravel Schema::wrapTable(): connection table prefix + blueprint table.
+        $label = $this->getTablePrefix().$blueprint->getTable();
         $this->assertIdentifier($label);
 
         return $label;

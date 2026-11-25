@@ -612,7 +612,7 @@ final class Neo4jConnection extends Connection
     #[\Override]
     protected function getDefaultSchemaGrammar()
     {
-        return new Neo4jSchemaGrammar();
+        return $this->withTablePrefix(new Neo4jSchemaGrammar());
     }
 
     /**
@@ -675,6 +675,11 @@ final class Neo4jConnection extends Connection
     public function setTablePrefix($prefix): static
     {
         $this->tablePrefix = $prefix;
+        $this->getQueryGrammar()->setTablePrefix($prefix);
+
+        if ($this->schemaGrammar !== null) {
+            $this->schemaGrammar->setTablePrefix($prefix);
+        }
 
         return $this;
     }
