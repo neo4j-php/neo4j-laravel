@@ -2,10 +2,12 @@
 
 namespace Neo4j\Neo4jLaravel;
 
+use Illuminate\Database\Connection;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Database\Schema\Grammars\Grammar;
 use Illuminate\Support\Fluent;
 use InvalidArgumentException;
+use ReflectionClass;
 
 /**
  * Compiles Neo4j schema Cypher (indexes, constraints, vector indexes).
@@ -19,8 +21,53 @@ use InvalidArgumentException;
  */
 final class Neo4jSchemaGrammar extends Grammar
 {
-    public function __construct()
+    /**
+     * Label prefix for Cypher identifiers.
+     *
+     * Kept locally so compile-only unit tests and Laravel 12's withTablePrefix()
+     * keep working; Laravel 13 moved prefix onto the connection.
+     */
+    private string $neo4jTablePrefix = '';
+
+    /**
+     * @param  Connection|null  $connection  Required at runtime on Laravel 13; optional for compile-only tests.
+     */
+    public function __construct($connection = null)
     {
+        if (! $connection instanceof Connection) {
+            return;
+        }
+
+        $parentConstructor = (new ReflectionClass(\Illuminate\Database\Grammar::class))->getConstructor();
+
+        if ($parentConstructor !== null && $parentConstructor->getNumberOfRequiredParameters() > 0) {
+            parent::__construct($connection);
+        } elseif (method_exists($this, 'setConnection')) {
+            $this->setConnection($connection);
+        }
+
+        $this->neo4jTablePrefix = $connection->getTablePrefix();
+    }
+
+    /**
+     * @param  string  $prefix
+     * @return $this
+     */
+    #[\Override]
+    public function setTablePrefix($prefix)
+    {
+        $this->neo4jTablePrefix = (string) $prefix;
+
+        return $this;
+    }
+
+    /**
+     * @return string
+     */
+    #[\Override]
+    public function getTablePrefix()
+    {
+        return $this->neo4jTablePrefix;
     }
 
     /**
@@ -329,8 +376,10 @@ final class Neo4jSchemaGrammar extends Grammar
      *
      * Community Edition rejects this Cypher; callers should treat that as an
      * environment limitation, not a driver bug.
+     *
+     * @param  mixed  $connection  Unused; optional for Laravel 12 Grammar compatibility (removed in Laravel 13).
      */
-    public function compileCreateDatabase($name, $connection): string
+    public function compileCreateDatabase($name, $connection = null): string
     {
         $this->assertIdentifier((string) $name);
 
@@ -350,7 +399,10 @@ final class Neo4jSchemaGrammar extends Grammar
         return sprintf('DROP DATABASE %s IF EXISTS', $name);
     }
 
-    public function compileTables(): string
+    /**
+     * @param  mixed  $schema  Unused; accepted for Laravel 13 Grammar compatibility.
+     */
+    public function compileTables($schema = null): string
     {
         return 'CALL db.labels() YIELD label RETURN label AS name ORDER BY name';
     }
@@ -376,9 +428,15 @@ RETURN labelsOrTypes
 CYPHER;
     }
 
-    public function compileColumns($table): string
+    /**
+     * Laravel 12 calls compileColumns($table); Laravel 13 calls compileColumns($schema, $table).
+     *
+     * @param  mixed  $schemaOrTable
+     * @param  mixed  $table
+     */
+    public function compileColumns($schemaOrTable, $table = null): string
     {
-        $label = (string) $table;
+        $label = (string) ($table ?? $schemaOrTable);
         $this->assertIdentifier($label);
 
         // Embed the label literally: SHOW/schema procs do not take Laravel bindings
@@ -395,9 +453,15 @@ CYPHER,
         );
     }
 
-    public function compileIndexes($table): string
+    /**
+     * Laravel 12 calls compileIndexes($table); Laravel 13 calls compileIndexes($schema, $table).
+     *
+     * @param  mixed  $schemaOrTable
+     * @param  mixed  $table
+     */
+    public function compileIndexes($schemaOrTable, $table = null): string
     {
-        $label = (string) $table;
+        $label = (string) ($table ?? $schemaOrTable);
         $this->assertIdentifier($label);
 
         return sprintf(

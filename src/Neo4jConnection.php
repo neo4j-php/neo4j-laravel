@@ -612,7 +612,15 @@ final class Neo4jConnection extends Connection
     #[\Override]
     protected function getDefaultSchemaGrammar()
     {
-        return $this->withTablePrefix(new Neo4jSchemaGrammar());
+        $grammar = new Neo4jSchemaGrammar($this);
+
+        // Laravel 12 applies the table prefix via withTablePrefix(); Laravel 13
+        // removed that helper and wires prefix through the connection instead.
+        if (method_exists($this, 'withTablePrefix')) {
+            return $this->withTablePrefix($grammar);
+        }
+
+        return $grammar;
     }
 
     /**

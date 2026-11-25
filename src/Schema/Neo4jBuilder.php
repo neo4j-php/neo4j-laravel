@@ -74,15 +74,18 @@ final class Neo4jBuilder extends Neo4jSchemaBuilder
      *
      * @return list<array{name: string, schema: null, size: null, comment: null, collation: null, engine: null}>
      */
+    /**
+     * @param  string|null  $schema  Unused; accepted for Laravel 13 Builder compatibility.
+     */
     #[\Override]
-    public function getTables()
+    public function getTables($schema = null)
     {
         /** @var Neo4jSchemaGrammar $grammar */
         $grammar = $this->grammar;
 
         $names = [];
 
-        foreach ($this->connection->selectFromWriteConnection($grammar->compileTables()) as $row) {
+        foreach ($this->connection->selectFromWriteConnection($grammar->compileTables($schema)) as $row) {
             $name = is_object($row) ? ($row->name ?? null) : ($row['name'] ?? null);
 
             if (is_string($name) && $name !== '') {
