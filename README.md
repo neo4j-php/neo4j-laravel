@@ -8,7 +8,7 @@ Run Cypher through Laravel's `DB` facade, query builder, and Eloquent-style mode
 
 [![Latest Version](https://img.shields.io/packagist/v/neo4j-php/neo4j-laravel?style=for-the-badge&logo=packagist&logoColor=white&color=018bff)](https://packagist.org/packages/neo4j-php/neo4j-laravel)
 [![PHP](https://img.shields.io/badge/PHP-8.2%2B-777bb4?style=for-the-badge&logo=php&logoColor=white)](https://www.php.net/)
-[![Laravel](https://img.shields.io/badge/Laravel-11%20%7C%2012%20%7C%2013-ff2d20?style=for-the-badge&logo=laravel&logoColor=white)](https://laravel.com/)
+[![Laravel](https://img.shields.io/badge/Laravel-12%20%7C%2013-ff2d20?style=for-the-badge&logo=laravel&logoColor=white)](https://laravel.com/)
 [![License](https://img.shields.io/badge/License-MIT-2ea44f?style=for-the-badge)](https://opensource.org/licenses/MIT)
 
 [![Unit Tests](https://img.shields.io/github/actions/workflow/status/neo4j-php/neo4j-laravel/unit-tests.yml?branch=main&label=unit%20tests&style=flat-square&logo=github)](https://github.com/neo4j-php/neo4j-laravel/actions/workflows/unit-tests.yml)
@@ -20,6 +20,7 @@ Run Cypher through Laravel's `DB` facade, query builder, and Eloquent-style mode
 - [Configuration](#configuration)
 - [Quick Start](#5-minute-quick-start)
 - [Usage](#usage)
+- [Migrations](#migrations)
 - [Logging and debugging](#logging-and-debugging)
 - [Troubleshooting](#troubleshooting)
 - [Testing](#testing)
@@ -78,6 +79,7 @@ You can always talk to Neo4j with [`laudis/neo4j-php-client`](https://github.com
 | Service container | Auto-discovered `Neo4jServiceProvider`; inject `ClientInterface` / `SessionInterface` |
 | Eloquent models | `HasNeo4jConnection` or `Neo4jModel` — UUID keys, SoftDeletes, pagination, FK-style relations |
 | Graph relations on models | Eloquent `matchRelationship()` with `attach` / `sync` / `detach` / `create` / eager load |
+| Migrations | Laravel's `Migrator` + Artisan commands; graph schema via `Schema::node()` / `relationship()` |
 | Transactions | `DB::transaction()` and `beginTransaction()` / `commit()` / `rollBack()` cover raw Cypher, the query builder, and Eloquent; retries on transient errors |
 
 ### Developer experience
@@ -95,7 +97,7 @@ You can always talk to Neo4j with [`laudis/neo4j-php-client`](https://github.com
 | Requirement | Supported |
 | --- | --- |
 | PHP | 8.2+ |
-| Laravel (`illuminate/database`, `illuminate/support`) | 11, 12, or 13 |
+| Laravel (`illuminate/database`, `illuminate/support`) | 12 or 13 |
 | Neo4j | Reachable Bolt / Neo4j URI (CI uses Neo4j 5.22) |
 | Core dependency | [`laudis/neo4j-php-client`](https://github.com/neo4j-php/neo4j-php-client) `^3.2` |
 
@@ -103,9 +105,9 @@ Optional:
 
 | Package | Purpose |
 | --- | --- |
-| [`barryvdh/laravel-debugbar`](https://github.com/barryvdh/laravel-debugbar) or [`fruitcake/laravel-debugbar`](https://github.com/fruitcake/laravel-debugbar) (v4+) | Show Cypher in Debugbar's Queries tab |
+| [`barryvdh/laravel-debugbar`](https://github.com/barryvdh/laravel-debugbar) `^3 \|\| ^4` (v4 = [`fruitcake/laravel-debugbar`](https://github.com/fruitcake/laravel-debugbar)) | Show Cypher in Debugbar's Queries tab |
 
-> CI currently runs unit and integration tests on **PHP 8.2–8.4 with Laravel 11**. Composer allows Laravel 12 and 13 via Illuminate constraints.
+> CI currently runs unit and integration tests on **PHP 8.2–8.4 with Laravel 12 and 13**.
 
 ---
 
@@ -575,6 +577,86 @@ Filters are applied before scoring, so `where('active', true)` never misses matc
 
 ---
 
+## Migrations
+
+This package reuses Laravel's original `Migrator` and Artisan commands. Graph schema is defined with `Schema::connection('neo4j')->node()` / `relationship()` — **labels and relationship types are not created as data**; only indexes and constraints are.
+
+### How it fits together
+
+Laravel's `Migrator` and Artisan commands stay unchanged. The only Neo4j-specific piece for history is a thin `MigrationRepositoryInterface` adapter:
+
+- **History CRUD** goes through the existing query builder on label `:_LaravelMigration` (`migration`, `batch`, `migrated_at`), with a uniqueness constraint on `migration`.
+- **Stock `DatabaseMigrationRepository` is not used for Neo4j** — its `create` / `hasTable` / `drop` APIs assume SQL blueprints. It remains for SQL connections via a connection-aware wrapper.
+- **Eloquent models are not used for history** — the Migrator talks to the repository contract, and `HasNeo4jConnection` would auto-assign UUID ids that Laravel's `log()` does not supply.
+- **Schema API** is graph-native (`node()` / `relationship()` → `Neo4jSchemaGrammar` Cypher). No custom `Neo4jMigrator` and no replacement Artisan commands.
+
+### Create a migration
+
+```bash
+php artisan make:migration create_movie_graph_schema
+```
+
+```php
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Support\Facades\Schema;
+
+return new class extends Migration
+{
+    public function up(): void
+    {
+        Schema::connection('neo4j')->node('Person', function ($node) {
+            $node->unique('email');       // person_email_unique
+            $node->index('name');         // person_name_index
+            // $node->vector('embedding', 1536); // optional vector index
+        });
+
+        Schema::connection('neo4j')->node('Movie', function ($node) {
+            $node->index('released');
+        });
+
+        Schema::connection('neo4j')->relationship('ACTED_IN', function ($relationship) {
+            $relationship->index('role'); // acted_in_role_index
+        });
+    }
+
+    public function down(): void
+    {
+        Schema::connection('neo4j')->dropConstraint('person_email_unique');
+        Schema::connection('neo4j')->dropIndex('person_name_index');
+        Schema::connection('neo4j')->dropIndex('movie_released_index');
+        Schema::connection('neo4j')->dropIndex('acted_in_role_index');
+    }
+};
+```
+
+Default schema object names are `{owner}_{properties}_{unique|index|vector}` in lowercase. Pass an explicit second argument to `unique()` / `index()` / `vector()` to override.
+
+### Run, status, and rollback
+
+Use the stock Laravel commands (with Neo4j as the migration connection):
+
+```bash
+php artisan migrate --database=neo4j
+php artisan migrate:status --database=neo4j
+php artisan migrate:rollback --database=neo4j
+php artisan migrate:reset --database=neo4j
+```
+
+`migrate:install` creates the uniqueness constraint that backs the history repository when needed; `migrate` also installs it automatically if missing.
+
+### Known limitations
+
+| Topic | Detail |
+| --- | --- |
+| SQL-style `Schema::create` / `hasTable` / `drop` | Not supported on Neo4j — use `node()` / `relationship()` / `dropIndex()` / `dropConstraint()` |
+| Schema transactions | Neo4j DDL is not wrapped in Bolt transactions by the Migrator (`supportsSchemaTransactions` is false) |
+| Rollback safety | Dropping indexes/constraints does **not** delete nodes or relationships |
+| Labels as data | Defining a node label never creates nodes |
+| History label | Fixed internal label `:_LaravelMigration` (isolated per Neo4j connection/database) |
+| Supported Neo4j | Index/constraint Cypher targets Neo4j 5.x (CI uses 5.22) |
+
+---
+
 ## Configuration
 
 ### Connection keys
@@ -663,7 +745,9 @@ In SPA / API apps, ensure `storage/debugbar` is writable and inspect the API req
 | Session / auth errors with Neo4j as default | Set `SESSION_DRIVER=file` (or redis, etc.); keep Laravel auth on a relational store unless you intentionally model users in Neo4j |
 | Cypher missing from Debugbar | Install barryvdh/fruitcake Debugbar; enable the queries collector; resolve client/session from the container (or use `DB::connection('neo4j')`); for AJAX, open the API request in Debugbar |
 | `NEO4J_QUERY_CHANNEL` seems ignored | Channel name must exist under `logging.channels`; otherwise the package falls back to the default logger |
-| Unsupported PHP / Laravel | PHP 8.2+ and Illuminate 11–13 are required by Composer |
+| Unsupported PHP / Laravel | PHP 8.2+ and Illuminate 12–13 are required by Composer |
+| `Schema::create() is not supported for Neo4j` | Use `Schema::connection('neo4j')->node()` / `relationship()` instead of SQL-style tables |
+| Migration history / constraint errors | Ensure the Neo4j user can create constraints; run `migrate` with `--database=neo4j`; history lives under `:_LaravelMigration` |
 
 Open an issue: [github.com/neo4j-php/neo4j-laravel/issues](https://github.com/neo4j-php/neo4j-laravel/issues).
 

@@ -25,7 +25,7 @@ final class Neo4jSchemaGrammarTest extends TestCase
     {
         self::assertSame(
             'DROP INDEX document_embedding IF EXISTS',
-            (new Neo4jSchemaGrammar())->compileDropVectorIndex('document_embedding')
+            (new Neo4jSchemaGrammar())->compileDropNamedVectorIndex('document_embedding')
         );
     }
 
@@ -54,5 +54,45 @@ final class Neo4jSchemaGrammarTest extends TestCase
         $this->expectException(InvalidArgumentException::class);
 
         (new Neo4jSchemaGrammar())->compileCreateVectorIndex('bad-name', 'Document', 'embedding', 3);
+    }
+
+    public function testCompilesNodeIndexAndUniqueConstraint(): void
+    {
+        $grammar = new Neo4jSchemaGrammar();
+
+        self::assertSame(
+            'CREATE INDEX person_name_index IF NOT EXISTS FOR (n:Person) ON (n.name)',
+            $grammar->compileCreateNodeIndex('person_name_index', 'Person', ['name'])
+        );
+
+        self::assertSame(
+            'CREATE CONSTRAINT person_email_unique IF NOT EXISTS FOR (n:Person) REQUIRE n.email IS UNIQUE',
+            $grammar->compileCreateNodeUniqueConstraint('person_email_unique', 'Person', ['email'])
+        );
+
+        self::assertSame(
+            'CREATE CONSTRAINT person_email_name_unique IF NOT EXISTS FOR (n:Person) REQUIRE (n.email, n.name) IS UNIQUE',
+            $grammar->compileCreateNodeUniqueConstraint('person_email_name_unique', 'Person', ['email', 'name'])
+        );
+    }
+
+    public function testCompilesRelationshipIndexAndDrops(): void
+    {
+        $grammar = new Neo4jSchemaGrammar();
+
+        self::assertSame(
+            'CREATE INDEX acted_in_role_index IF NOT EXISTS FOR ()-[r:ACTED_IN]-() ON (r.role)',
+            $grammar->compileCreateRelationshipIndex('acted_in_role_index', 'ACTED_IN', ['role'])
+        );
+
+        self::assertSame(
+            'DROP INDEX person_name_index IF EXISTS',
+            $grammar->compileDropIndex('person_name_index')
+        );
+
+        self::assertSame(
+            'DROP CONSTRAINT person_email_unique IF EXISTS',
+            $grammar->compileDropConstraint('person_email_unique')
+        );
     }
 }
