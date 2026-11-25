@@ -12,20 +12,31 @@ use Neo4j\Neo4jLaravel\Neo4jSchemaGrammar;
 /**
  * Schema builder that maps Laravel tables to Neo4j labels.
  *
- * Neo4j is schemaless for properties: {@see Builder::create()} materializes
- * constraints and indexes from the blueprint, not typed columns. A label is
+ * Neo4j is schemaless for properties: {@see create()} materializes **constraints
+ * and indexes only**. Typed blueprint columns (`string()`, `integer()`, …) are
+ * ignored for DDL — they do not create properties on nodes. A label is
  * considered to "exist" when nodes use it or when any index/constraint targets it
  * (so migrate:install works before any migration rows are inserted).
  *
  * {@see create()} requires at least one primary, unique, index, or fulltext so the
  * label is visible to {@see hasTable()} without inserting nodes.
+ *
+ * Destructive ops: {@see drop()} / {@see dropIfExists()} also `DETACH DELETE` all
+ * nodes for that label (SQL DROP TABLE semantics). {@see dropAllTables()} wipes
+ * **every** user constraint/index and **all** nodes in the connected database —
+ * never call it on a shared Neo4j instance outside tests / migrate:fresh.
  */
 final class Neo4jBuilder extends Builder
 {
     /**
      * Create a label's constraints/indexes from a Laravel blueprint.
      *
+     * Typed columns are not materialized. Only primary / unique / index /
+     * fulltext (and auto-increment → uniqueness) emit Neo4j DDL.
+     *
      * @param  string  $table
+     *
+     * @throws InvalidArgumentException when the blueprint defines no schema objects
      */
     #[\Override]
     public function create($table, Closure $callback): void
@@ -140,9 +151,12 @@ final class Neo4jBuilder extends Builder
     }
 
     /**
-     * Drop a label: remove its constraints/indexes, then detach-delete its nodes.
+     * Drop a label: remove its constraints/indexes, then DETACH DELETE its nodes.
      *
-     * Matches SQL DROP TABLE semantics for this driver.
+     * Matches SQL DROP TABLE: schema objects **and** data for that label are
+     * removed. This is not a schema-only drop — Neo4j users who only want to
+     * remove indexes/constraints should drop those by name instead. A dedicated
+     * schema-only helper may be added in a later phase.
      *
      * @param  string  $table
      */
@@ -153,6 +167,11 @@ final class Neo4jBuilder extends Builder
     }
 
     /**
+     * Drop a label if it exists (constraints/indexes + DETACH DELETE nodes).
+     *
+     * No-op when {@see hasTable()} is false. Same data-destructive semantics as
+     * {@see drop()}.
+     *
      * @param  string  $table
      */
     #[\Override]
@@ -162,9 +181,14 @@ final class Neo4jBuilder extends Builder
     }
 
     /**
-     * Drop every user constraint/index and delete all nodes.
+     * Drop every user constraint/index and delete **all** nodes in the database.
      *
-     * Equivalent to migrate:fresh on SQL — destructive for the whole Neo4j database.
+     * Equivalent to migrate:fresh on SQL. This runs `MATCH (n) DETACH DELETE n`
+     * after dropping droppable indexes/constraints — it is irreversible and unsafe
+     * on any shared or production Neo4j instance. Prefer label-scoped
+     * {@see drop()} / {@see dropIfExists()} outside tests.
+     *
+     * @warning Wipes the entire connected Neo4j database contents.
      */
     #[\Override]
     public function dropAllTables(): void
@@ -190,6 +214,11 @@ final class Neo4jBuilder extends Builder
     }
 
     /**
+     * Create a Neo4j database (multi-database / `CREATE DATABASE`).
+     *
+     * Neo4j **Enterprise Edition only**. On Community the server rejects the
+     * Cypher with an edition/capability error — there is no Community fallback.
+     *
      * @param  string  $name
      */
     #[\Override]
@@ -202,6 +231,11 @@ final class Neo4jBuilder extends Builder
     }
 
     /**
+     * Drop a Neo4j database if it exists (`DROP DATABASE`).
+     *
+     * Neo4j **Enterprise Edition only**. On Community the server rejects the
+     * Cypher with an edition/capability error — there is no Community fallback.
+     *
      * @param  string  $name
      */
     #[\Override]

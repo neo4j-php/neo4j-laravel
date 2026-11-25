@@ -20,6 +20,7 @@ Run Cypher through Laravel's `DB` facade, query builder, and Eloquent-style mode
 - [Configuration](#configuration)
 - [Quick Start](#5-minute-quick-start)
 - [Usage](#usage)
+- [Schema and migrations](#schema-and-migrations)
 - [Logging and debugging](#logging-and-debugging)
 - [Troubleshooting](#troubleshooting)
 - [Testing](#testing)
@@ -79,6 +80,7 @@ You can always talk to Neo4j with [`laudis/neo4j-php-client`](https://github.com
 | Eloquent models | `HasNeo4jConnection` or `Neo4jModel` — UUID keys, SoftDeletes, pagination, FK-style relations |
 | Graph relations on models | Eloquent `matchRelationship()` with `attach` / `sync` / `detach` / `create` / eager load |
 | Transactions | `DB::transaction()` and `beginTransaction()` / `commit()` / `rollBack()` cover raw Cypher, the query builder, and Eloquent; retries on transient errors |
+| Schema / migrations | `Schema::create()` / `hasTable()` / `drop()` map tables → labels (constraints/indexes); stock `migrate:install` works |
 
 ### Developer experience
 
@@ -572,6 +574,53 @@ Limits:
 - `limit(0)` returns no rows, as in Laravel's SQL builder.
 
 Filters are applied before scoring, so `where('active', true)` never misses matches because the index returned only inactive neighbours. Filtered and unlimited searches score each node with `vector.similarity.cosine()` (exact, but a scan over the label). If your index uses euclidean similarity, call `useVectorSimilarityFunction('euclidean')` so those searches score the same way the index does.
+
+---
+
+## Schema and migrations
+
+Phase 1 maps Laravel’s SQL-shaped `Schema` API onto Neo4j labels so `migrate:install` and the stock migration repository can run against a Neo4j connection.
+
+```php
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Schema;
+
+Schema::connection('neo4j')->create('User', function (Blueprint $table) {
+    $table->uuid('id')->primary();
+    $table->string('email')->unique();
+    $table->string('name')->index();
+});
+```
+
+> [!IMPORTANT]
+> **Typed columns are not materialized.** `string()`, `integer()`, `boolean()`, and similar blueprint methods do **not** create properties on nodes. Neo4j is schemaless for properties: `Schema::create()` only emits **constraints and indexes** (primary / unique / index / fulltext). At least one of those is required so `hasTable()` can see the label before any nodes exist.
+
+```php
+// Works: uniqueness constraint + range index
+Schema::connection('neo4j')->create('User', function (Blueprint $table) {
+    $table->uuid('id')->primary();
+    $table->string('email')->unique();
+});
+
+// Throws: no primary / unique / index / fulltext — label would be invisible to hasTable()
+Schema::connection('neo4j')->create('Post', function (Blueprint $table) {
+    $table->string('title');
+});
+```
+
+### Drop semantics (destructive)
+
+| API | What it removes |
+| --- | --- |
+| `drop('User')` / `dropIfExists('User')` | Constraints and indexes for that label, then **`DETACH DELETE` all `:User` nodes** (SQL `DROP TABLE` semantics — data goes too) |
+| `dropAllTables()` | **All** user constraints/indexes, then **`MATCH (n) DETACH DELETE n`** — wipes the connected database |
+
+> [!WARNING]
+> Prefer label-scoped `drop()` / `dropIfExists()` in app code. Use `dropAllTables()` only for tests or an intentional migrate:fresh-style wipe. Never call it on a shared or production Neo4j instance. A schema-only drop (indexes/constraints without deleting nodes) is not exposed yet.
+
+### Create / drop database
+
+`Schema::connection('neo4j')->createDatabase('analytics')` and `dropDatabaseIfExists('analytics')` compile to Neo4j multi-database Cypher. That feature is **Enterprise Edition only**; Community servers reject it with an edition/capability error. There is no Community fallback in this driver.
 
 ---
 
