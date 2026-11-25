@@ -195,4 +195,20 @@ final class Neo4jSchemaGrammarTest extends TestCase
 
         (new Neo4jSchemaGrammar())->compileCreate($blueprint, new Fluent(['name' => 'create']));
     }
+
+    public function testAppliesTablePrefixToCompiledLabels(): void
+    {
+        $grammar = new Neo4jSchemaGrammar();
+        $grammar->setTablePrefix('app_');
+
+        $blueprint = new Blueprint('User');
+
+        self::assertSame(
+            'CREATE CONSTRAINT user_email_unique IF NOT EXISTS FOR (n:app_User) REQUIRE n.email IS UNIQUE',
+            $grammar->compileUnique($blueprint, new Fluent([
+                'index' => 'user_email_unique',
+                'columns' => ['email'],
+            ]))
+        );
+    }
 }

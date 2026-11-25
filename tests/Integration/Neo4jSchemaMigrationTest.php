@@ -103,9 +103,32 @@ final class Neo4jSchemaMigrationTest extends TestCase
 
         $indexes = Schema::connection('neo4j')->getIndexes('User');
         $indexNames = array_column($indexes, 'name');
+        $byName = array_column($indexes, null, 'name');
 
+        self::assertContains('user_id_primary', $indexNames);
         self::assertContains('user_email_unique', $indexNames);
         self::assertContains('user_name_index', $indexNames);
+        self::assertTrue($byName['user_id_primary']['primary']);
+        self::assertTrue($byName['user_id_primary']['unique']);
+        self::assertFalse($byName['user_email_unique']['primary']);
+        self::assertTrue($byName['user_email_unique']['unique']);
+    }
+
+    public function testCreateWithoutIndexesIsRejected(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('requires at least one primary, unique, index, or fulltext');
+
+        Schema::connection('neo4j')->create('Post', function (Blueprint $table): void {
+            $table->string('title');
+        });
+    }
+
+    public function testDropIfExistsWithMissingLabelIsANoOp(): void
+    {
+        Schema::connection('neo4j')->dropIfExists('DoesNotExist');
+
+        self::assertFalse(Schema::connection('neo4j')->hasTable('DoesNotExist'));
     }
 
     public function testDropRemovesNodesAndSchemaObjects(): void

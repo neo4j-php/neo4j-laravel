@@ -93,13 +93,15 @@ final class Neo4jProcessor extends Processor
 
             $type = strtolower((string) ($result->type ?? 'range'));
             $unique = (bool) ($result->unique ?? false);
+            $name = (string) $result->name;
 
             return [
-                'name' => (string) $result->name,
+                'name' => $name,
                 'columns' => array_values(array_map('strval', $properties)),
                 'type' => $type,
                 'unique' => $unique,
-                'primary' => $unique,
+                // Neo4j has no primary-key type; our grammar names PK constraints *_primary.
+                'primary' => $unique && str_ends_with(strtolower($name), '_primary'),
             ];
         }, $results);
     }
