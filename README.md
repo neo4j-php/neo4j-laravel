@@ -793,7 +793,7 @@ In SPA / API apps, ensure `storage/debugbar` is writable and inspect the API req
 | Cypher missing from Debugbar | Install barryvdh/fruitcake Debugbar; enable the queries collector; resolve client/session from the container (or use `DB::connection('neo4j')`); for AJAX, open the API request in Debugbar |
 | `NEO4J_QUERY_CHANNEL` seems ignored | Channel name must exist under `logging.channels`; otherwise the package falls back to the default logger |
 | Unsupported PHP / Laravel | PHP 8.2+ and Illuminate 12–13 are required by Composer |
-| `Schema::create() is not supported for Neo4j` | Use `Schema::connection('neo4j')->node()` / `relationship()` instead of SQL-style tables |
+| `Neo4j Schema::create() requires at least one primary, unique, index, or fulltext` | Add a primary/unique/index/fulltext so `hasTable()` can see the label; typed columns alone are not materialized. Or use graph-native `node()` / `relationship()` |
 | Migration history / constraint errors | Ensure the Neo4j user can create constraints; run `migrate` with `--database=neo4j`; history lives under `:_LaravelMigration` |
 
 Open an issue: [github.com/neo4j-php/neo4j-laravel/issues](https://github.com/neo4j-php/neo4j-laravel/issues).
