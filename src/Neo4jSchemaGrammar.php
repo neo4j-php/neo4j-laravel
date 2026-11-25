@@ -299,9 +299,9 @@ final class Neo4jSchemaGrammar extends Grammar
 
     public function compileDrop(Blueprint $blueprint, Fluent $command): string
     {
-        // Neo4jBuilder::drop() performs multi-step cleanup (constraints, indexes, nodes).
+        // Neo4jSchemaBuilder::drop() performs multi-step cleanup (constraints, indexes, nodes).
         // Blueprint::drop() still expects a compiler; this is the fallback when the
-        // blueprint path is used instead of Neo4jBuilder::drop().
+        // blueprint path is used instead of Neo4jSchemaBuilder::drop().
         return $this->compileDeleteNodes($this->label($blueprint));
     }
 
@@ -409,7 +409,7 @@ final class Neo4jSchemaGrammar extends Grammar
 
     public function compileConstraintLabels(): string
     {
-        // SHOW … cannot UNWIND directly; Neo4jBuilder flattens labelsOrTypes.
+        // SHOW … cannot UNWIND directly; Neo4jSchemaBuilder flattens labelsOrTypes.
         return <<<'CYPHER'
 SHOW CONSTRAINTS
 YIELD labelsOrTypes

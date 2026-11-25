@@ -589,7 +589,7 @@ Laravel's `Migrator` and Artisan commands stay unchanged. The only Neo4j-specifi
 - **History CRUD** goes through the existing query builder on label `:_LaravelMigration` (`migration`, `batch`, `migrated_at`), with a uniqueness constraint on `migration`.
 - **Stock `DatabaseMigrationRepository` is not used for Neo4j** — history uses `Neo4jMigrationRepository`. SQL connections still use Laravel's repository via a connection-aware wrapper.
 - **Eloquent models are not used for history** — the Migrator talks to the repository contract, and `HasNeo4jConnection` would auto-assign UUID ids that Laravel's `log()` does not supply.
-- **Schema API** supports both graph-native (`node()` / `relationship()`) and Phase 1 SQL-style (`create()` / `hasTable()` / `drop()`) via `Neo4jBuilder`. No custom `Neo4jMigrator` and no replacement Artisan commands.
+- **Schema API** supports both graph-native (`node()` / `relationship()`) and Phase 1 SQL-style (`create()` / `hasTable()` / `drop()`) via `Neo4jSchemaBuilder`. No custom `Neo4jMigrator` and no replacement Artisan commands.
 
 ### Create a migration (graph-native)
 

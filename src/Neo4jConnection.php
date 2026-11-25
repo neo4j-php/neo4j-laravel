@@ -16,7 +16,7 @@ use Laudis\Neo4j\Types\CypherMap;
 use LogicException;
 use Neo4j\Neo4jLaravel\Debug\CapturingUnmanagedTransaction;
 use Neo4j\Neo4jLaravel\Decorators\LaravelNeo4jClient;
-use Neo4j\Neo4jLaravel\Schema\Neo4jBuilder;
+use Neo4j\Neo4jLaravel\Schema\Neo4jSchemaBuilder;
 use PDO;
 use Throwable;
 
@@ -626,17 +626,17 @@ final class Neo4jConnection extends Connection
     /**
      * Get a schema builder instance for the connection.
      *
-     * Returns {@see Neo4jBuilder}, which includes graph-native node()/relationship()
-     * APIs and Phase 1 SQL-style create()/hasTable()/drop().
+     * Returns {@see Neo4jSchemaBuilder}, which includes graph-native
+     * node()/relationship() and SQL-style create()/hasTable()/drop().
      */
     #[\Override]
-    public function getSchemaBuilder(): Neo4jBuilder
+    public function getSchemaBuilder(): Neo4jSchemaBuilder
     {
         if ($this->schemaGrammar === null) {
             $this->useDefaultSchemaGrammar();
         }
 
-        return new Neo4jBuilder($this);
+        return new Neo4jSchemaBuilder($this);
     }
 
     /**
