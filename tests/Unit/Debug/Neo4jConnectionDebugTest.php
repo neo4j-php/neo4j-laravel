@@ -4,18 +4,25 @@ namespace Neo4j\Neo4jLaravel\Tests\Unit\Debug;
 
 use Illuminate\Database\Events\QueryExecuted;
 use Laudis\Neo4j\Contracts\ClientInterface;
+use Laudis\Neo4j\Contracts\SessionInterface;
 use Mockery;
 use Mockery\MockInterface;
 use Neo4j\Neo4jLaravel\Neo4jConnection;
 use Neo4j\Neo4jLaravel\Neo4jServiceProvider;
+use Neo4j\Neo4jLaravel\Tests\Support\StubsConnectionSession;
 use Orchestra\Testbench\TestCase;
 
 class Neo4jConnectionDebugTest extends TestCase
 {
+    use StubsConnectionSession;
+
     private Neo4jConnection $connection;
 
     /** @var ClientInterface&MockInterface */
     private ClientInterface $client;
+
+    /** @var SessionInterface&MockInterface */
+    private SessionInterface $session;
 
     /** @var list<QueryExecuted> */
     private array $executed = [];
@@ -30,6 +37,7 @@ class Neo4jConnectionDebugTest extends TestCase
         parent::setUp();
 
         $this->client = Mockery::mock(ClientInterface::class);
+        $this->session = $this->stubConnectionSession($this->client, 'testing');
         $this->executed = [];
 
         $this->connection = new Neo4jConnection(
@@ -38,6 +46,7 @@ class Neo4jConnectionDebugTest extends TestCase
             '',
             ['name' => 'testing']
         );
+        $this->connection->enableQueryLog();
         $this->connection->setEventDispatcher($this->app['events']);
 
         $this->app['events']->listen(QueryExecuted::class, function (QueryExecuted $event): void {
@@ -125,7 +134,7 @@ class Neo4jConnectionDebugTest extends TestCase
         $query = 'MATCH (n:Test) RETURN n';
         $bindings = ['param' => 'value'];
 
-        $this->client->shouldReceive('readTransaction')
+        $this->session->shouldReceive('readTransaction')
             ->once()
             ->andReturn(['result']);
 
@@ -143,7 +152,7 @@ class Neo4jConnectionDebugTest extends TestCase
         $bindings = ['param' => 'value'];
         $exception = new \RuntimeException('Test exception');
 
-        $this->client->shouldReceive('readTransaction')
+        $this->session->shouldReceive('readTransaction')
             ->once()
             ->andThrow($exception);
 
@@ -170,7 +179,7 @@ class Neo4jConnectionDebugTest extends TestCase
         $bindings = ['name' => 'x'];
         $exception = new \RuntimeException('write failed');
 
-        $this->client->shouldReceive('writeTransaction')
+        $this->session->shouldReceive('writeTransaction')
             ->once()
             ->andThrow($exception);
 
@@ -203,7 +212,7 @@ class Neo4jConnectionDebugTest extends TestCase
             ->with($query, $bindings)
             ->andThrow($exception);
 
-        $this->client->shouldReceive('beginTransaction')
+        $this->session->shouldReceive('beginTransaction')
             ->once()
             ->andReturn($inner);
 
@@ -232,7 +241,7 @@ class Neo4jConnectionDebugTest extends TestCase
         $summary = null;
         $result = new \Laudis\Neo4j\Databags\SummarizedResult($summary);
 
-        $this->client->shouldReceive('writeTransaction')
+        $this->session->shouldReceive('writeTransaction')
             ->once()
             ->andReturn($result);
 
@@ -251,9 +260,9 @@ class Neo4jConnectionDebugTest extends TestCase
         $summary = null;
         $result = new \Laudis\Neo4j\Databags\SummarizedResult($summary);
 
-        $this->client->shouldReceive('run')
+        $this->session->shouldReceive('run')
             ->once()
-            ->with($query, $bindings)
+            ->with($query, $bindings, null)
             ->andReturn($result);
 
         $this->connection->runCypher($query, $bindings);
@@ -268,7 +277,7 @@ class Neo4jConnectionDebugTest extends TestCase
     {
         $this->connection->disableQueryLog();
 
-        $this->client->shouldReceive('readTransaction')
+        $this->session->shouldReceive('readTransaction')
             ->once()
             ->andReturn(['result']);
 
@@ -292,7 +301,7 @@ class Neo4jConnectionDebugTest extends TestCase
             ->with($query, $bindings)
             ->andReturn($result);
 
-        $this->client->shouldReceive('beginTransaction')
+        $this->session->shouldReceive('beginTransaction')
             ->once()
             ->andReturn($inner);
 
@@ -319,7 +328,7 @@ class Neo4jConnectionDebugTest extends TestCase
             ->with($query, $bindings)
             ->andReturn($result);
 
-        $this->client->shouldReceive('beginTransaction')
+        $this->session->shouldReceive('beginTransaction')
             ->once()
             ->andReturn($inner);
 

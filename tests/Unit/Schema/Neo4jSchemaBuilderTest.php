@@ -3,6 +3,8 @@
 namespace Neo4j\Neo4jLaravel\Tests\Unit\Schema;
 
 use Laudis\Neo4j\Contracts\ClientInterface;
+use Laudis\Neo4j\Contracts\DriverInterface;
+use Laudis\Neo4j\Contracts\SessionInterface;
 use Laudis\Neo4j\Contracts\TransactionInterface;
 use Laudis\Neo4j\Databags\DatabaseInfo;
 use Laudis\Neo4j\Databags\ResultSummary;
@@ -86,9 +88,15 @@ final class Neo4jSchemaBuilderTest extends TestCase
             return new SummarizedResult($summary);
         });
 
+        $session = $this->createMock(SessionInterface::class);
+        $session->method('writeTransaction')->willReturnCallback(static fn (callable $handler): mixed => $handler($tx));
+
+        $driver = $this->createMock(DriverInterface::class);
+        $driver->method('createSession')->willReturn($session);
+
         /** @var ClientInterface&MockObject $client */
         $client = $this->createMock(ClientInterface::class);
-        $client->method('writeTransaction')->willReturnCallback(static fn (callable $handler): mixed => $handler($tx));
+        $client->method('getDriver')->willReturn($driver);
 
         $connection = new Neo4jConnection($client, 'neo4j', '', [
             'name' => 'neo4j',
