@@ -636,6 +636,112 @@ final class Neo4jQueryGrammarTest extends TestCase
         );
     }
 
+    public function testCompilesVariableLengthMatchRelationship(): void
+    {
+        $builder = $this->neo4jBuilder()
+            ->from('Person')
+            ->matchRelationship('KNOWS*1..3>', 'Person', 'knows', 'friend');
+
+        self::assertSame(
+            'MATCH (n:Person)-[knows:KNOWS*1..3]->(friend:Person) RETURN n',
+            $builder->toSql()
+        );
+    }
+
+    public function testCompilesUnboundedAndFixedHopMatchRelationship(): void
+    {
+        $unbounded = $this->neo4jBuilder()
+            ->from('Person')
+            ->matchRelationship('KNOWS*>', 'Person', 'knows', 'friend');
+
+        self::assertSame(
+            'MATCH (n:Person)-[knows:KNOWS*]->(friend:Person) RETURN n',
+            $unbounded->toSql()
+        );
+
+        $fixed = $this->neo4jBuilder()
+            ->from('Person')
+            ->matchRelationship('KNOWS*2>', 'Person', 'knows', 'friend');
+
+        self::assertSame(
+            'MATCH (n:Person)-[knows:KNOWS*2]->(friend:Person) RETURN n',
+            $fixed->toSql()
+        );
+    }
+
+    public function testCompilesMatchPathWithBoundPathAlias(): void
+    {
+        $builder = $this->neo4jBuilder()
+            ->from('Person')
+            ->matchPath('p', 'KNOWS*1..2>', 'Person', 'knows', 'friend')
+            ->select(['n', 'p', 'friend']);
+
+        self::assertSame(
+            'MATCH p = (n:Person)-[knows:KNOWS*1..2]->(friend:Person) RETURN n, p, friend',
+            $builder->toSql()
+        );
+    }
+
+    public function testJoinRelationshipCompilesAsMatchRelationship(): void
+    {
+        $builder = $this->neo4jBuilder()
+            ->from('Person')
+            ->joinRelationship('ACTED_IN>', 'Movie', 'role', 'film')
+            ->where('film.title', 'The Matrix')
+            ->select(['n', 'role', 'film']);
+
+        self::assertSame(
+            'MATCH (n:Person)-[role:ACTED_IN]->(film:Movie) WHERE (film.title = $p0) '
+                .'RETURN n, role, film',
+            $builder->toSql()
+        );
+        self::assertSame(['The Matrix'], $builder->getBindings());
+    }
+
+    public function testRejectsInvalidHopQuantifier(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('hop quantifier');
+
+        $this->neo4jBuilder()
+            ->from('Person')
+            ->matchRelationship('KNOWS*abc>', 'Person');
+    }
+
+    public function testRejectsCorrelateFromOuterNodeOnTopLevelSelect(): void
+    {
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('correlateFromOuterNode is only valid inside EXISTS');
+
+        $builder = $this->neo4jBuilder()
+            ->from('Person')
+            ->matchRelationship('KNOWS>', 'Person', 'knows', 'friend');
+        $builder->correlateFromOuterNode = true;
+
+        $builder->toSql();
+    }
+
+    public function testCompilesCorrelatedWhereExistsWithMatchRelationship(): void
+    {
+        $builder = $this->neo4jBuilder()
+            ->from('Person')
+            ->whereExists(function (Builder $query): void {
+                /** @var Neo4jQueryBuilder $query */
+                $query->from('Movie')
+                    ->matchRelationship('ACTED_IN>', 'Movie', 'exists_rel', 'exists_related');
+                $query->correlateFromOuterNode = true;
+                $query->where('title', 'The Matrix');
+            });
+
+        self::assertSame(
+            'MATCH (n:Person) WHERE EXISTS { '
+                .'MATCH (n)-[exists_rel:ACTED_IN]->(exists_related:Movie) '
+                .'WHERE (exists_related.title = $p0) } RETURN n',
+            $builder->toSql()
+        );
+        self::assertSame(['The Matrix'], $builder->getBindings());
+    }
+
     public function testCompilesMatchRelationshipWithRelationshipAndRelatedWheres(): void
     {
         $builder = $this->neo4jBuilder()
@@ -995,7 +1101,7 @@ final class Neo4jQueryGrammarTest extends TestCase
     }
 
     private function neo4jBuilder(): Neo4jQueryBuilder
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        {
+    {
         return new Neo4jQueryBuilder(
             $this->createMock(ConnectionInterface::class),
             new Neo4jQueryGrammar(),

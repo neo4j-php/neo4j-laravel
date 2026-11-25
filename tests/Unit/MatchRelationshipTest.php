@@ -74,12 +74,72 @@ final class MatchRelationshipTest extends TestCase
         );
     }
 
-    public function testWhereHasIsNotSupportedYet(): void
+    public function testWhereHasCompilesCorrelatedMatchRelationshipExists(): void
+    {
+        $sql = ErPerson::query()->whereHas('movies')->toSql();
+
+        self::assertSame(
+            'MATCH (n:ErPerson) WHERE EXISTS { '
+                .'MATCH (n)-[exists_rel:ACTED_IN]->(exists_related:ErMovie) '
+               .'} RETURN n',
+            $sql
+        );
+    }
+
+    public function testWhereHasCallbackConstraintsRelatedNode(): void
+    {
+        $builder = ErPerson::query()->whereHas('movies', function ($query): void {
+            $query->where('title', 'The Matrix');
+        });
+
+        self::assertSame(
+            'MATCH (n:ErPerson) WHERE EXISTS { '
+                .'MATCH (n)-[exists_rel:ACTED_IN]->(exists_related:ErMovie) '
+               .'WHERE (exists_related.title = $p0) '
+               .'} RETURN n',
+            $builder->toSql()
+        );
+        self::assertSame(['The Matrix'], $builder->getBindings());
+    }
+
+    public function testWhereHasIncomingRelationship(): void
+    {
+        $sql = ErMovie::query()->whereHas('actors')->toSql();
+
+        self::assertSame(
+            'MATCH (n:ErMovie) WHERE EXISTS { '
+                .'MATCH (n)<-[exists_rel:ACTED_IN]-(exists_related:ErPerson) '
+               .'} RETURN n',
+            $sql
+        );
+    }
+
+    public function testWhereDoesntHaveCompilesNotExists(): void
+    {
+        $sql = ErPerson::query()->whereDoesntHave('movies')->toSql();
+
+        self::assertSame(
+            'MATCH (n:ErPerson) WHERE NOT EXISTS { '
+                .'MATCH (n)-[exists_rel:ACTED_IN]->(exists_related:ErMovie) '
+               .'} RETURN n',
+            $sql
+        );
+    }
+
+    public function testCountBasedHasIsNotSupported(): void
     {
         $this->expectException(RuntimeException::class);
-        $this->expectExceptionMessage('whereHas() / has() / withCount()');
+        $this->expectExceptionMessage('Count-based has()');
 
-        ErPerson::query()->whereHas('movies')->toSql();
+        ErPerson::query()->has('movies', '>=', 2)->toSql();
+    }
+
+    public function testWithCountIsNotSupported(): void
+    {
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('withCount()');
+
+        ErPerson::query()->withCount('movies')->toSql();
     }
 }
 

@@ -2,6 +2,7 @@
 
 namespace Neo4j\Neo4jLaravel\Relations;
 
+use Illuminate\Contracts\Database\Query\Expression as ExpressionContract;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Collection as EloquentCollection;
 use Illuminate\Database\Eloquent\Model;
@@ -214,6 +215,12 @@ class MatchRelationship extends Relation
     }
 
     /**
+     * Convert Laravel's join-style existence query into a correlated Cypher
+     * matchRelationship() pattern (EXISTS { MATCH (n)-[rel]->(related) ... }).
+     *
+     * Callbacks on whereHas()/has() constrain the **related node** (exists_related),
+     * not relationship properties.
+     *
      * @param  \Illuminate\Database\Eloquent\Builder<TRelatedModel>  $query
      * @param  \Illuminate\Database\Eloquent\Builder<TDeclaringModel>  $parentQuery
      * @param  array|mixed  $columns
@@ -221,8 +228,52 @@ class MatchRelationship extends Relation
      */
     public function getRelationExistenceQuery(Builder $query, Builder $parentQuery, $columns = ['*'])
     {
+        // withCount() / withAggregate() pass an Expression (e.g. count(*)); refuse those.
+        if ($columns instanceof ExpressionContract) {
+            throw new RuntimeException(
+                'Count-based has() / whereHas(..., operator, count) and withCount() are not yet supported '
+                .'for Neo4j matchRelationship() relations. Use existence-only whereHas()/has() instead.'
+            );
+        }
+
+        $base = $query->getQuery();
+
+        if (! $base instanceof Neo4jQueryBuilder) {
+            throw new RuntimeException(
+                'Eloquent matchRelationship() whereHas()/has() requires models on the Neo4j connection / query builder.'
+            );
+        }
+
+        $base->correlateFromOuterNode = true;
+
+        if ($base->graphRelationships === []) {
+            $base->matchRelationship(
+                $this->relationshipType,
+                $this->relatedLabel(),
+                'exists_rel',
+                'exists_related',
+            );
+        }
+
+        return $query->select($columns);
+    }
+
+    /**
+     * Count-based has() / withCount() are not supported for graph relations yet.
+     *
+     * Existence-only checks (has/whereHas with implicit count >= 1) use
+     * {@see getRelationExistenceQuery()}. Asking for a numeric comparison would
+     * otherwise fall through to SQL-style count subqueries and emit invalid Cypher.
+     *
+     * @param  \Illuminate\Database\Eloquent\Builder<TRelatedModel>  $query
+     * @param  \Illuminate\Database\Eloquent\Builder<TDeclaringModel>  $parentQuery
+     * @return \Illuminate\Database\Eloquent\Builder<TRelatedModel>
+     */
+    public function getRelationExistenceCountQuery(Builder $query, Builder $parentQuery)
+    {
         throw new RuntimeException(
-            'whereHas() / has() / withCount() are not yet supported for Neo4j matchRelationship() relations.'
+            'Count-based has() / whereHas(..., operator, count) and withCount() are not yet supported '
+            .'for Neo4j matchRelationship() relations. Use existence-only whereHas()/has() instead.'
         );
     }
 
