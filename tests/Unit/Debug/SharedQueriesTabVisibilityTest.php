@@ -2,17 +2,19 @@
 
 namespace Neo4j\Neo4jLaravel\Tests\Unit\Debug;
 
-use Fruitcake\LaravelDebugbar\LaravelDebugbar;
-use Fruitcake\LaravelDebugbar\ServiceProvider as DebugbarServiceProvider;
 use Laudis\Neo4j\Contracts\ClientInterface;
 use Laudis\Neo4j\Databags\SummarizedResult;
 use Mockery;
 use Neo4j\Neo4jLaravel\Neo4jServiceProvider;
 use Orchestra\Testbench\TestCase;
 use ReflectionMethod;
+use RuntimeException;
 
 /**
  * End-to-end: Cypher executions appear in Laravel Debugbar's shared Queries tab.
+ *
+ * Works with barryvdh/laravel-debugbar ^3 (Barryvdh\Debugbar) and ^4
+ * (Fruitcake\LaravelDebugbar).
  */
 class SharedQueriesTabVisibilityTest extends TestCase
 {
@@ -20,7 +22,7 @@ class SharedQueriesTabVisibilityTest extends TestCase
     {
         return [
             Neo4jServiceProvider::class,
-            DebugbarServiceProvider::class,
+            $this->debugbarServiceProvider(),
         ];
     }
 
@@ -65,7 +67,6 @@ class SharedQueriesTabVisibilityTest extends TestCase
 
     public function test_queries_tab_is_registered_without_cypher_collector(): void
     {
-        /** @var LaravelDebugbar $debugbar */
         $debugbar = $this->app->make('debugbar');
         $debugbar->enable();
         $debugbar->boot();
@@ -81,7 +82,6 @@ class SharedQueriesTabVisibilityTest extends TestCase
 
     public function test_cypher_appears_in_shared_queries_collector_dataset(): void
     {
-        /** @var LaravelDebugbar $debugbar */
         $debugbar = $this->app->make('debugbar');
         $debugbar->enable();
         $debugbar->boot();
@@ -113,7 +113,6 @@ class SharedQueriesTabVisibilityTest extends TestCase
 
     public function test_failed_cypher_appears_with_error_annotation_in_queries_tab(): void
     {
-        /** @var LaravelDebugbar $debugbar */
         $debugbar = $this->app->make('debugbar');
         $debugbar->enable();
         $debugbar->boot();
@@ -121,7 +120,7 @@ class SharedQueriesTabVisibilityTest extends TestCase
         $client = Mockery::mock(ClientInterface::class);
         $client->shouldReceive('writeTransaction')
             ->once()
-            ->andThrow(new \RuntimeException('syntax error here'));
+            ->andThrow(new RuntimeException('syntax error here'));
         $this->app->instance(\Laudis\Neo4j\Client::class, $client);
         $this->app->instance(ClientInterface::class, $client);
         $this->app->make('db')->purge('neo4j');
@@ -131,7 +130,7 @@ class SharedQueriesTabVisibilityTest extends TestCase
         try {
             $this->app->make('db')->connection('neo4j')->write($cypher, []);
             $this->fail('Expected exception was not thrown');
-        } catch (\RuntimeException $e) {
+        } catch (RuntimeException $e) {
             $this->assertSame('syntax error here', $e->getMessage());
         }
 
@@ -147,7 +146,6 @@ class SharedQueriesTabVisibilityTest extends TestCase
 
     public function test_http_response_includes_debugbar_queries_tab_with_cypher(): void
     {
-        /** @var LaravelDebugbar $debugbar */
         $debugbar = $this->app->make('debugbar');
         $debugbar->enable();
 
@@ -166,13 +164,32 @@ class SharedQueriesTabVisibilityTest extends TestCase
         $this->assertGreaterThanOrEqual(1, $dataset['queries']['nb_statements']);
     }
 
-    private function debugbarControlsJs(LaravelDebugbar $debugbar): string
+    /**
+     * @param  object  $debugbar
+     */
+    private function debugbarControlsJs(object $debugbar): string
     {
         $renderer = $debugbar->getJavascriptRenderer();
         $method = new ReflectionMethod($renderer, 'getJsControlsDefinitionCode');
         $method->setAccessible(true);
 
         return (string) $method->invoke($renderer, 'phpdebugbar');
+    }
+
+    /**
+     * @return class-string
+     */
+    private function debugbarServiceProvider(): string
+    {
+        if (class_exists(\Fruitcake\LaravelDebugbar\ServiceProvider::class)) {
+            return \Fruitcake\LaravelDebugbar\ServiceProvider::class;
+        }
+
+        if (class_exists(\Barryvdh\Debugbar\ServiceProvider::class)) {
+            return \Barryvdh\Debugbar\ServiceProvider::class;
+        }
+
+        $this->markTestSkipped('barryvdh/laravel-debugbar is not installed.');
     }
 
     protected function tearDown(): void

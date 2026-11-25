@@ -5,11 +5,9 @@ namespace Neo4j\Neo4jLaravel;
 use DateTimeInterface;
 use Illuminate\Database\Connection;
 use Illuminate\Database\Events\QueryExecuted;
-use Illuminate\Database\Query\Grammars\Grammar as QueryGrammar;
 use Illuminate\Database\Query\Processors\Processor;
 use Illuminate\Database\Schema\Grammars\Grammar as SchemaGrammar;
 use Laudis\Neo4j\Contracts\ClientInterface;
-use Neo4j\Neo4jLaravel\Schema\Neo4jSchemaBuilder;
 use Laudis\Neo4j\Contracts\TransactionInterface;
 use Laudis\Neo4j\Contracts\UnmanagedTransactionInterface;
 use Laudis\Neo4j\Databags\SummarizedResult;
@@ -18,9 +16,9 @@ use Laudis\Neo4j\Types\CypherMap;
 use LogicException;
 use Neo4j\Neo4jLaravel\Debug\CapturingUnmanagedTransaction;
 use Neo4j\Neo4jLaravel\Decorators\LaravelNeo4jClient;
+use Neo4j\Neo4jLaravel\Schema\Neo4jSchemaBuilder;
 use PDO;
 use Throwable;
-
 
 /**
  * @psalm-suppress PropertyNotSetInConstructor
@@ -607,19 +605,6 @@ final class Neo4jConnection extends Connection
     }
 
     /**
-     * Get a graph-native schema builder for this connection.
-     */
-    #[\Override]
-    public function getSchemaBuilder()
-    {
-        if (is_null($this->schemaGrammar)) {
-            $this->useDefaultSchemaGrammar();
-        }
-
-        return new Neo4jSchemaBuilder($this);
-    }
-
-    /**
      * Get the default schema grammar instance.
      *
      * @return SchemaGrammar
@@ -627,7 +612,31 @@ final class Neo4jConnection extends Connection
     #[\Override]
     protected function getDefaultSchemaGrammar()
     {
-        return new Neo4jSchemaGrammar();
+        $grammar = new Neo4jSchemaGrammar($this);
+
+        // Laravel 12 applies the table prefix via withTablePrefix(); Laravel 13
+        // removed that helper and wires prefix through the connection instead.
+        if (method_exists($this, 'withTablePrefix')) {
+            return $this->withTablePrefix($grammar);
+        }
+
+        return $grammar;
+    }
+
+    /**
+     * Get a schema builder instance for the connection.
+     *
+     * Returns {@see Neo4jSchemaBuilder}, which includes graph-native
+     * node()/relationship() and SQL-style create()/hasTable()/drop().
+     */
+    #[\Override]
+    public function getSchemaBuilder(): Neo4jSchemaBuilder
+    {
+        if ($this->schemaGrammar === null) {
+            $this->useDefaultSchemaGrammar();
+        }
+
+        return new Neo4jSchemaBuilder($this);
     }
 
     /**
@@ -677,6 +686,11 @@ final class Neo4jConnection extends Connection
     public function setTablePrefix($prefix): static
     {
         $this->tablePrefix = $prefix;
+        $this->getQueryGrammar()->setTablePrefix($prefix);
+
+        if ($this->schemaGrammar !== null) {
+            $this->schemaGrammar->setTablePrefix($prefix);
+        }
 
         return $this;
     }

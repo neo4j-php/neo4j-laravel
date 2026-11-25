@@ -113,4 +113,35 @@ final class Neo4jProcessorTest extends TestCase
             ],
         ], $results);
     }
+
+    public function testProcessIndexesMarksOnlyPrimaryNamedUniquesAsPrimary(): void
+    {
+        $indexes = (new Neo4jProcessor())->processIndexes([
+            (object) [
+                'name' => 'user_id_primary',
+                'type' => 'RANGE',
+                'properties' => ['id'],
+                'unique' => true,
+            ],
+            (object) [
+                'name' => 'user_email_unique',
+                'type' => 'RANGE',
+                'properties' => ['email'],
+                'unique' => true,
+            ],
+            (object) [
+                'name' => 'user_name_index',
+                'type' => 'RANGE',
+                'properties' => ['name'],
+                'unique' => false,
+            ],
+        ]);
+
+        self::assertTrue($indexes[0]['primary']);
+        self::assertTrue($indexes[0]['unique']);
+        self::assertFalse($indexes[1]['primary']);
+        self::assertTrue($indexes[1]['unique']);
+        self::assertFalse($indexes[2]['primary']);
+        self::assertFalse($indexes[2]['unique']);
+    }
 }
