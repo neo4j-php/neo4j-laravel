@@ -211,4 +211,33 @@ final class Neo4jSchemaGrammarTest extends TestCase
             ]))
         );
     }
+
+    public function testCompilesCreateAndDropDatabase(): void
+    {
+        // Neo4j Enterprise multi-database only — Community rejects these at runtime.
+        $grammar = new Neo4jSchemaGrammar();
+
+        self::assertSame(
+            'CREATE DATABASE analytics IF NOT EXISTS',
+            $grammar->compileCreateDatabase('analytics', null)
+        );
+        self::assertSame(
+            'DROP DATABASE analytics IF EXISTS',
+            $grammar->compileDropDatabaseIfExists('analytics')
+        );
+    }
+
+    public function testCompileCreateIgnoresTypedColumnsWithoutPrimary(): void
+    {
+        $blueprint = new Blueprint('Post', function (Blueprint $table): void {
+            $table->string('title');
+            $table->integer('views');
+        });
+        $blueprint->create();
+
+        self::assertSame(
+            [],
+            (new Neo4jSchemaGrammar())->compileCreate($blueprint, new Fluent(['name' => 'create']))
+        );
+    }
 }

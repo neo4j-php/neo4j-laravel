@@ -157,6 +157,13 @@ final class Neo4jSchemaGrammar extends Grammar
     }
 
     /**
+     * Compile create-table into Neo4j uniqueness constraints for primary /
+     * auto-increment columns only.
+     *
+     * Typed columns (`string()`, `integer()`, …) produce **no** DDL. Unique /
+     * index / fulltext commands are compiled separately via
+     * {@see compileUnique()}, {@see compileIndex()}, {@see compileFulltext()}.
+     *
      * @return list<string>
      */
     public function compileCreate(Blueprint $blueprint, Fluent $command): array
@@ -317,6 +324,12 @@ final class Neo4jSchemaGrammar extends Grammar
         return 'RETURN true AS disabled';
     }
 
+    /**
+     * Compile CREATE DATABASE (Neo4j Enterprise multi-database only).
+     *
+     * Community Edition rejects this Cypher; callers should treat that as an
+     * environment limitation, not a driver bug.
+     */
     public function compileCreateDatabase($name, $connection): string
     {
         $this->assertIdentifier((string) $name);
@@ -324,6 +337,12 @@ final class Neo4jSchemaGrammar extends Grammar
         return sprintf('CREATE DATABASE %s IF NOT EXISTS', $name);
     }
 
+    /**
+     * Compile DROP DATABASE (Neo4j Enterprise multi-database only).
+     *
+     * Community Edition rejects this Cypher; callers should treat that as an
+     * environment limitation, not a driver bug.
+     */
     public function compileDropDatabaseIfExists($name): string
     {
         $this->assertIdentifier((string) $name);
