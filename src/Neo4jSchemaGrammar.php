@@ -2,19 +2,72 @@
 
 namespace Neo4j\Neo4jLaravel;
 
+use Illuminate\Database\Connection;
+use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Database\Schema\Grammars\Grammar;
 use Illuminate\Support\Fluent;
 use InvalidArgumentException;
+use ReflectionClass;
 
 /**
  * Compiles Neo4j schema Cypher (indexes, constraints, vector indexes).
+ *
+ * Supports the graph-native Schema::node() / relationship() API and the Phase 1
+ * SQL-style Schema::create() path (labels ≈ tables). Typed blueprint columns are
+ * ignored for DDL; auto-increment / primary / unique / index / fulltext emit
+ * Neo4j constraints and indexes.
  *
  * @psalm-suppress PropertyNotSetInConstructor
  */
 final class Neo4jSchemaGrammar extends Grammar
 {
-    public function __construct()
+    /**
+     * Label prefix for Cypher identifiers.
+     *
+     * Kept locally so compile-only unit tests and Laravel 12's withTablePrefix()
+     * keep working; Laravel 13 moved prefix onto the connection.
+     */
+    private string $neo4jTablePrefix = '';
+
+    /**
+     * @param  Connection|null  $connection  Required at runtime on Laravel 13; optional for compile-only tests.
+     */
+    public function __construct($connection = null)
     {
+        if (! $connection instanceof Connection) {
+            return;
+        }
+
+        $parentConstructor = (new ReflectionClass(\Illuminate\Database\Grammar::class))->getConstructor();
+
+        if ($parentConstructor !== null && $parentConstructor->getNumberOfRequiredParameters() > 0) {
+            parent::__construct($connection);
+        } elseif (method_exists($this, 'setConnection')) {
+            $this->setConnection($connection);
+        }
+
+        $this->neo4jTablePrefix = $connection->getTablePrefix();
+    }
+
+    /**
+     * @param  string  $prefix
+     * @return $this
+     */
+    #[\Override]
+    public function setTablePrefix($prefix)
+    {
+        $this->neo4jTablePrefix = (string) $prefix;
+
+        return $this;
+    }
+
+    /**
+     * @return string
+     */
+    #[\Override]
+    public function getTablePrefix()
+    {
+        return $this->neo4jTablePrefix;
     }
 
     /**
@@ -69,11 +122,22 @@ final class Neo4jSchemaGrammar extends Grammar
         );
     }
 
-    public function compileDropIndex(string $name): string
+    /**
+     * Drop an index by name (graph Schema API) or from a Laravel Blueprint command.
+     */
+    public function compileDropIndex(mixed $nameOrBlueprint, mixed $command = null): string
     {
-        $this->assertIdentifier($name);
+        if ($nameOrBlueprint instanceof Blueprint) {
+            return $this->compileDropNamedIndex($this->indexName($command, $nameOrBlueprint, 'index'));
+        }
 
-        return sprintf('DROP INDEX %s IF EXISTS', $name);
+        if (! is_string($nameOrBlueprint)) {
+            throw new InvalidArgumentException('Index name must be a string.');
+        }
+
+        $this->assertIdentifier($nameOrBlueprint);
+
+        return sprintf('DROP INDEX %s IF EXISTS', $nameOrBlueprint);
     }
 
     public function compileDropConstraint(string $name): string
@@ -137,6 +201,490 @@ final class Neo4jSchemaGrammar extends Grammar
     public function compileDropNamedVectorIndex(string $name): string
     {
         return $this->compileDropIndex($name);
+    }
+
+    /**
+     * Compile create-table into Neo4j uniqueness constraints for primary /
+     * auto-increment columns only.
+     *
+     * Typed columns (`string()`, `integer()`, …) produce **no** DDL. Unique /
+     * index / fulltext commands are compiled separately via
+     * {@see compileUnique()}, {@see compileIndex()}, {@see compileFulltext()}.
+     *
+     * @return list<string>
+     */
+    public function compileCreate(Blueprint $blueprint, Fluent $command): array
+    {
+        $statements = [];
+        $label = $this->label($blueprint);
+
+        foreach ($blueprint->getAddedColumns() as $column) {
+            if (! $column->autoIncrement && ! $column->primary) {
+                continue;
+            }
+
+            $property = (string) $column->name;
+            $this->assertIdentifier($property);
+
+            $name = $this->constraintName($label, [$property], 'primary');
+            $statements[] = $this->compileUniqueConstraint($name, $label, [$property]);
+        }
+
+        return $statements;
+    }
+
+    /**
+     * @return list<string>
+     */
+    public function compileAdd(Blueprint $blueprint, Fluent $command): array
+    {
+        return $this->compileCreate($blueprint, $command);
+    }
+
+    public function compilePrimary(Blueprint $blueprint, Fluent $command): string
+    {
+        return $this->compileUniqueConstraint(
+            $this->indexName($command, $blueprint, 'primary'),
+            $this->label($blueprint),
+            $this->properties($command)
+        );
+    }
+
+    public function compileUnique(Blueprint $blueprint, Fluent $command): string
+    {
+        return $this->compileUniqueConstraint(
+            $this->indexName($command, $blueprint, 'unique'),
+            $this->label($blueprint),
+            $this->properties($command)
+        );
+    }
+
+    public function compileIndex(Blueprint $blueprint, Fluent $command): string
+    {
+        $name = $this->indexName($command, $blueprint, 'index');
+        $label = $this->label($blueprint);
+        $properties = $this->properties($command);
+
+        $on = implode(', ', array_map(
+            static fn (string $property): string => 'n.'.$property,
+            $properties
+        ));
+
+        return sprintf(
+            'CREATE RANGE INDEX %s IF NOT EXISTS FOR (n:%s) ON (%s)',
+            $name,
+            $label,
+            $on
+        );
+    }
+
+    public function compileFulltext(Blueprint $blueprint, Fluent $command): string
+    {
+        $name = $this->indexName($command, $blueprint, 'fulltext');
+        $label = $this->label($blueprint);
+        $properties = $this->properties($command);
+
+        $each = implode(', ', array_map(
+            static fn (string $property): string => 'n.'.$property,
+            $properties
+        ));
+
+        return sprintf(
+            'CREATE FULLTEXT INDEX %s IF NOT EXISTS FOR (n:%s) ON EACH [%s]',
+            $name,
+            $label,
+            $each
+        );
+    }
+
+    public function compileDrop(Blueprint $blueprint, Fluent $command): string
+    {
+        // Neo4jSchemaBuilder::drop() performs multi-step cleanup (constraints, indexes, nodes).
+        // Blueprint::drop() still expects a compiler; this is the fallback when the
+        // blueprint path is used instead of Neo4jSchemaBuilder::drop().
+        return $this->compileDeleteNodes($this->label($blueprint));
+    }
+
+    public function compileDropIfExists(Blueprint $blueprint, Fluent $command): string
+    {
+        return $this->compileDrop($blueprint, $command);
+    }
+
+    public function compileDropPrimary(Blueprint $blueprint, Fluent $command): string
+    {
+        return $this->compileDropConstraint($this->indexName($command, $blueprint, 'primary'));
+    }
+
+    public function compileDropUnique(Blueprint $blueprint, Fluent $command): string
+    {
+        return $this->compileDropConstraint($this->indexName($command, $blueprint, 'unique'));
+    }
+
+
+    public function compileDropFullText(Blueprint $blueprint, Fluent $command): string
+    {
+        return $this->compileDropNamedIndex($this->indexName($command, $blueprint, 'fulltext'));
+    }
+
+    /**
+     * @return list<string>
+     */
+    public function compileDropColumn(Blueprint $blueprint, Fluent $command): array
+    {
+        $label = $this->label($blueprint);
+        $statements = [];
+
+        foreach ((array) $command->columns as $column) {
+            $property = (string) $column;
+            $this->assertIdentifier($property);
+            $statements[] = sprintf(
+                'MATCH (n:%s) WHERE n.%s IS NOT NULL REMOVE n.%s',
+                $label,
+                $property,
+                $property
+            );
+        }
+
+        return $statements;
+    }
+
+    /**
+     * Foreign keys have no Neo4j DDL equivalent (use relationships in data).
+     */
+    public function compileForeign(Blueprint $blueprint, Fluent $command): mixed
+    {
+        return null;
+    }
+
+    public function compileDropForeign(Blueprint $blueprint, Fluent $command): mixed
+    {
+        return null;
+    }
+
+    public function compileEnableForeignKeyConstraints(): string
+    {
+        return 'RETURN true AS enabled';
+    }
+
+    public function compileDisableForeignKeyConstraints(): string
+    {
+        return 'RETURN true AS disabled';
+    }
+
+    /**
+     * Compile CREATE DATABASE (Neo4j Enterprise multi-database only).
+     *
+     * Community Edition rejects this Cypher; callers should treat that as an
+     * environment limitation, not a driver bug.
+     *
+     * @param  mixed  $connection  Unused; optional for Laravel 12 Grammar compatibility (removed in Laravel 13).
+     */
+    public function compileCreateDatabase($name, $connection = null): string
+    {
+        $this->assertIdentifier((string) $name);
+
+        return sprintf('CREATE DATABASE %s IF NOT EXISTS', $name);
+    }
+
+    /**
+     * Compile DROP DATABASE (Neo4j Enterprise multi-database only).
+     *
+     * Community Edition rejects this Cypher; callers should treat that as an
+     * environment limitation, not a driver bug.
+     */
+    public function compileDropDatabaseIfExists($name): string
+    {
+        $this->assertIdentifier((string) $name);
+
+        return sprintf('DROP DATABASE %s IF EXISTS', $name);
+    }
+
+    /**
+     * @param  mixed  $schema  Unused; accepted for Laravel 13 Grammar compatibility.
+     */
+    public function compileTables($schema = null): string
+    {
+        return 'CALL db.labels() YIELD label RETURN label AS name ORDER BY name';
+    }
+
+    /**
+     * Relationship types present as data edges.
+     */
+    public function compileRelationshipTypes(): string
+    {
+        return 'CALL db.relationshipTypes() YIELD relationshipType RETURN relationshipType AS name ORDER BY name';
+    }
+
+    /**
+     * Relationship types referenced by non-LOOKUP indexes (schema without data).
+     */
+    public function compileRelationshipIndexTypes(): string
+    {
+        return <<<'CYPHER'
+SHOW INDEXES
+YIELD labelsOrTypes, type, entityType
+WHERE type <> 'LOOKUP'
+  AND entityType = 'RELATIONSHIP'
+  AND labelsOrTypes IS NOT NULL
+RETURN labelsOrTypes
+CYPHER;
+    }
+
+    public function compileConstraintLabels(): string
+    {
+        // SHOW … cannot UNWIND directly; Neo4jSchemaBuilder flattens labelsOrTypes.
+        return <<<'CYPHER'
+SHOW CONSTRAINTS
+YIELD labelsOrTypes
+WHERE labelsOrTypes IS NOT NULL
+RETURN labelsOrTypes
+CYPHER;
+    }
+
+    public function compileIndexLabels(): string
+    {
+        return <<<'CYPHER'
+SHOW INDEXES
+YIELD labelsOrTypes, type
+WHERE type <> 'LOOKUP' AND labelsOrTypes IS NOT NULL
+RETURN labelsOrTypes
+CYPHER;
+    }
+
+    /**
+     * List constraints, optionally scoped to a node label / relationship type.
+     */
+    public function compileConstraints(?string $owner = null): string
+    {
+        if ($owner === null || $owner === '') {
+            return <<<'CYPHER'
+SHOW CONSTRAINTS
+YIELD name, type, entityType, labelsOrTypes, properties
+WHERE name IS NOT NULL
+RETURN name, type, entityType, labelsOrTypes, properties
+ORDER BY name
+CYPHER;
+        }
+
+        $this->assertIdentifier($owner);
+
+        return sprintf(
+            <<<'CYPHER'
+SHOW CONSTRAINTS
+YIELD name, type, entityType, labelsOrTypes, properties
+WHERE name IS NOT NULL
+  AND labelsOrTypes IS NOT NULL
+  AND '%s' IN labelsOrTypes
+RETURN name, type, entityType, labelsOrTypes, properties
+ORDER BY name
+CYPHER,
+            $owner
+        );
+    }
+
+    /**
+     * Laravel 12 calls compileColumns($table); Laravel 13 calls compileColumns($schema, $table).
+     *
+     * @param  mixed  $schemaOrTable
+     * @param  mixed  $table
+     */
+    public function compileColumns($schemaOrTable, $table = null): string
+    {
+        $label = (string) ($table ?? $schemaOrTable);
+        $this->assertIdentifier($label);
+
+        // Embed the label literally: SHOW/schema procs do not take Laravel bindings
+        // the same way as MATCH parameters in this driver path.
+        return sprintf(
+            <<<'CYPHER'
+CALL db.schema.nodeTypeProperties()
+YIELD nodeLabels, propertyName, propertyTypes
+WHERE '%s' IN nodeLabels AND propertyName IS NOT NULL
+RETURN DISTINCT propertyName AS name, propertyTypes AS type, true AS nullable, null AS default, null AS comment
+ORDER BY name
+CYPHER,
+            $label
+        );
+    }
+
+    /**
+     * Laravel 12 calls compileIndexes($table); Laravel 13 calls compileIndexes($schema, $table).
+     *
+     * @param  mixed  $schemaOrTable
+     * @param  mixed  $table
+     */
+    public function compileIndexes($schemaOrTable, $table = null): string
+    {
+        $label = (string) ($table ?? $schemaOrTable);
+        $this->assertIdentifier($label);
+
+        return sprintf(
+            <<<'CYPHER'
+SHOW INDEXES
+YIELD name, type, labelsOrTypes, properties, owningConstraint
+WHERE type <> 'LOOKUP' AND labelsOrTypes IS NOT NULL AND '%s' IN labelsOrTypes
+RETURN name, type, properties, owningConstraint IS NOT NULL AS unique
+ORDER BY name
+CYPHER,
+            $label
+        );
+    }
+
+    public function compileListConstraintNames(): string
+    {
+        return 'SHOW CONSTRAINTS YIELD name WHERE name IS NOT NULL RETURN name ORDER BY name';
+    }
+
+    public function compileListDroppableIndexNames(): string
+    {
+        return <<<'CYPHER'
+SHOW INDEXES
+YIELD name, type, owningConstraint
+WHERE type <> 'LOOKUP' AND name IS NOT NULL AND owningConstraint IS NULL
+RETURN name
+ORDER BY name
+CYPHER;
+    }
+
+    public function compileListConstraintNamesForLabel(string $label): string
+    {
+        $this->assertIdentifier($label);
+
+        return sprintf(
+            <<<'CYPHER'
+SHOW CONSTRAINTS
+YIELD name, labelsOrTypes
+WHERE name IS NOT NULL AND labelsOrTypes IS NOT NULL AND '%s' IN labelsOrTypes
+RETURN name
+ORDER BY name
+CYPHER,
+            $label
+        );
+    }
+
+    public function compileListDroppableIndexNamesForLabel(string $label): string
+    {
+        $this->assertIdentifier($label);
+
+        return sprintf(
+            <<<'CYPHER'
+SHOW INDEXES
+YIELD name, type, labelsOrTypes, owningConstraint
+WHERE type <> 'LOOKUP'
+  AND name IS NOT NULL
+  AND owningConstraint IS NULL
+  AND labelsOrTypes IS NOT NULL
+  AND '%s' IN labelsOrTypes
+RETURN name
+ORDER BY name
+CYPHER,
+            $label
+        );
+    }
+
+
+    public function compileDropNamedIndex(string $name): string
+    {
+        $this->assertIdentifier($name);
+
+        return sprintf('DROP INDEX %s IF EXISTS', $name);
+    }
+
+    public function compileDeleteNodes(string $label): string
+    {
+        $this->assertIdentifier($label);
+
+        return sprintf('MATCH (n:%s) DETACH DELETE n', $label);
+    }
+
+    public function compileDropAllNodes(): string
+    {
+        return 'MATCH (n) DETACH DELETE n';
+    }
+
+    /**
+     * @param  list<string>  $properties
+     */
+    private function compileUniqueConstraint(string $name, string $label, array $properties): string
+    {
+        $this->assertIdentifier($name);
+        $this->assertIdentifier($label);
+
+        if ($properties === []) {
+            throw new InvalidArgumentException('Neo4j uniqueness constraints require at least one property.');
+        }
+
+        foreach ($properties as $property) {
+            $this->assertIdentifier($property);
+        }
+
+        if (count($properties) === 1) {
+            $require = 'n.'.$properties[0];
+        } else {
+            $require = '('.implode(', ', array_map(
+                static fn (string $property): string => 'n.'.$property,
+                $properties
+            )).')';
+        }
+
+        return sprintf(
+            'CREATE CONSTRAINT %s IF NOT EXISTS FOR (n:%s) REQUIRE %s IS UNIQUE',
+            $name,
+            $label,
+            $require
+        );
+    }
+
+    private function label(Blueprint $blueprint): string
+    {
+        // Match Laravel Schema::wrapTable(): connection table prefix + blueprint table.
+        $label = $this->getTablePrefix().$blueprint->getTable();
+        $this->assertIdentifier($label);
+
+        return $label;
+    }
+
+    /**
+     * @return list<string>
+     */
+    private function properties(Fluent $command): array
+    {
+        $properties = array_values(array_map('strval', (array) $command->columns));
+
+        if ($properties === []) {
+            throw new InvalidArgumentException('Neo4j index commands require at least one property.');
+        }
+
+        foreach ($properties as $property) {
+            $this->assertIdentifier($property);
+        }
+
+        return $properties;
+    }
+
+    private function indexName(Fluent $command, Blueprint $blueprint, string $type): string
+    {
+        $name = $command->index;
+
+        if (! is_string($name) || $name === '') {
+            $name = $this->constraintName($this->label($blueprint), $this->properties($command), $type);
+        }
+
+        $this->assertIdentifier($name);
+
+        return $name;
+    }
+
+    /**
+     * @param  list<string>  $properties
+     */
+    private function constraintName(string $label, array $properties, string $type): string
+    {
+        $name = strtolower($label.'_'.implode('_', $properties).'_'.$type);
+        $name = str_replace(['-', '.'], '_', $name);
+        $this->assertIdentifier($name);
+
+        return $name;
     }
 
     /**

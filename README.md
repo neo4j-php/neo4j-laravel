@@ -20,7 +20,7 @@ Run Cypher through Laravel's `DB` facade, query builder, and Eloquent-style mode
 - [Configuration](#configuration)
 - [Quick Start](#5-minute-quick-start)
 - [Usage](#usage)
-- [Migrations](#migrations)
+- [Schema and migrations](#schema-and-migrations)
 - [Logging and debugging](#logging-and-debugging)
 - [Troubleshooting](#troubleshooting)
 - [Testing](#testing)
@@ -81,6 +81,7 @@ You can always talk to Neo4j with [`laudis/neo4j-php-client`](https://github.com
 | Graph relations on models | Eloquent `matchRelationship()` with `attach` / `sync` / `detach` / `create` / eager load |
 | Migrations | Laravel's `Migrator` + Artisan commands; graph schema via `Schema::node()` / `relationship()` |
 | Transactions | `DB::transaction()` and `beginTransaction()` / `commit()` / `rollBack()` cover raw Cypher, the query builder, and Eloquent; retries on transient errors |
+| Schema / migrations | Dual API: graph-native `node()` / `relationship()` plus SQL-style `create()` / `hasTable()` / `drop()` (tables → labels); introspection via `getColumns` / `getIndexes` / `getConstraints` / `getRelationshipTypes`; schema-only `dropSchema()` |
 
 ### Developer experience
 
@@ -577,20 +578,20 @@ Filters are applied before scoring, so `where('active', true)` never misses matc
 
 ---
 
-## Migrations
+## Schema and migrations
 
-This package reuses Laravel's original `Migrator` and Artisan commands. Graph schema is defined with `Schema::connection('neo4j')->node()` / `relationship()` — **labels and relationship types are not created as data**; only indexes and constraints are.
+This package reuses Laravel's original `Migrator` and Artisan commands. Prefer graph-native schema with `Schema::connection('neo4j')->node()` / `relationship()` — **labels and relationship types are not created as data**; only indexes and constraints are. Phase 1 also maps SQL-shaped `Schema::create()` / `hasTable()` / `drop()` onto labels when you need migrate-compatible blueprints.
 
 ### How it fits together
 
 Laravel's `Migrator` and Artisan commands stay unchanged. The only Neo4j-specific piece for history is a thin `MigrationRepositoryInterface` adapter:
 
 - **History CRUD** goes through the existing query builder on label `:_LaravelMigration` (`migration`, `batch`, `migrated_at`), with a uniqueness constraint on `migration`.
-- **Stock `DatabaseMigrationRepository` is not used for Neo4j** — its `create` / `hasTable` / `drop` APIs assume SQL blueprints. It remains for SQL connections via a connection-aware wrapper.
+- **Stock `DatabaseMigrationRepository` is not used for Neo4j** — history uses `Neo4jMigrationRepository`. SQL connections still use Laravel's repository via a connection-aware wrapper.
 - **Eloquent models are not used for history** — the Migrator talks to the repository contract, and `HasNeo4jConnection` would auto-assign UUID ids that Laravel's `log()` does not supply.
-- **Schema API** is graph-native (`node()` / `relationship()` → `Neo4jSchemaGrammar` Cypher). No custom `Neo4jMigrator` and no replacement Artisan commands.
+- **Schema API** supports both graph-native (`node()` / `relationship()`) and SQL-style (`create()` / `hasTable()` / `drop()`) via `Neo4jSchemaBuilder`, plus introspection and schema-only drops. No custom `Neo4jMigrator` and no replacement Artisan commands.
 
-### Create a migration
+### Create a migration (graph-native)
 
 ```bash
 php artisan make:migration create_movie_graph_schema
@@ -631,6 +632,72 @@ return new class extends Migration
 
 Default schema object names are `{owner}_{properties}_{unique|index|vector}` in lowercase. Pass an explicit second argument to `unique()` / `index()` / `vector()` to override.
 
+### SQL-style Schema::create (Phase 1)
+
+```php
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Schema;
+
+Schema::connection('neo4j')->create('User', function (Blueprint $table) {
+    $table->uuid('id')->primary();
+    $table->string('email')->unique();
+    $table->string('name')->index();
+});
+```
+
+> [!IMPORTANT]
+> **Typed columns are not materialized.** `string()`, `integer()`, `boolean()`, and similar blueprint methods do **not** create properties on nodes. Neo4j is schemaless for properties: `Schema::create()` only emits **constraints and indexes** (primary / unique / index / fulltext). At least one of those is required so `hasTable()` can see the label before any nodes exist.
+
+```php
+// Works: uniqueness constraint + range index
+Schema::connection('neo4j')->create('User', function (Blueprint $table) {
+    $table->uuid('id')->primary();
+    $table->string('email')->unique();
+});
+
+// Throws: no primary / unique / index / fulltext — label would be invisible to hasTable()
+Schema::connection('neo4j')->create('Post', function (Blueprint $table) {
+    $table->string('title');
+});
+```
+
+### Introspection
+
+```php
+$schema = Schema::connection('neo4j');
+
+$schema->getTables();              // labels (nodes + index/constraint targets)
+$schema->getColumns('User');       // properties seen on :User nodes
+$schema->getIndexes('User');       // indexes / uniqueness for that label
+$schema->getConstraints('User');   // Neo4j constraints (optional label/type filter)
+$schema->getRelationshipTypes();  // relationship types (data + relationship indexes)
+$schema->getForeignKeys('User');   // always [] — Neo4j has no FKs
+```
+
+### Drop semantics
+
+| API | What it removes |
+| --- | --- |
+| `dropIndex()` / `dropConstraint()` | Named schema object only — **does not** delete nodes |
+| `dropSchema('User')` / `dropSchemaIfExists('User')` | Constraints and indexes for that label — **does not** delete nodes |
+| `drop('User')` / `dropIfExists('User')` | Constraints and indexes for that label, then **`DETACH DELETE` all `:User` nodes** (SQL `DROP TABLE` semantics — data goes too) |
+| `dropAllTables()` | **All** user constraints/indexes, then **`MATCH (n) DETACH DELETE n`** — wipes the connected database |
+
+```php
+// Schema-only: keep :User nodes, remove constraints/indexes for the label
+Schema::connection('neo4j')->dropSchema('User');
+
+// Destructive: also DETACH DELETE every :User node
+Schema::connection('neo4j')->drop('User');
+```
+
+> [!WARNING]
+> Prefer `dropSchema()` / `dropIndex()` / `dropConstraint()` when you only want DDL cleanup. Use label-scoped `drop()` / `dropIfExists()` when you intentionally want SQL DROP TABLE behavior. Use `dropAllTables()` only for tests or an intentional migrate:fresh-style wipe. Never call it on a shared or production Neo4j instance.
+
+### Create / drop database
+
+`Schema::connection('neo4j')->createDatabase('analytics')` and `dropDatabaseIfExists('analytics')` compile to Neo4j multi-database Cypher. That feature is **Enterprise Edition only**. On Community, the driver throws a clear `RuntimeException` explaining the Enterprise requirement (instead of a raw `UnsupportedAdministrationCommand`). There is no Community fallback.
+
 ### Run, status, and rollback
 
 Use the stock Laravel commands (with Neo4j as the migration connection):
@@ -648,12 +715,15 @@ php artisan migrate:reset --database=neo4j
 
 | Topic | Detail |
 | --- | --- |
-| SQL-style `Schema::create` / `hasTable` / `drop` | Not supported on Neo4j — use `node()` / `relationship()` / `dropIndex()` / `dropConstraint()` |
+| Typed blueprint columns | Not materialized as node properties — only constraints/indexes are created |
 | Schema transactions | Neo4j DDL is not wrapped in Bolt transactions by the Migrator (`supportsSchemaTransactions` is false) |
-| Rollback safety | Dropping indexes/constraints does **not** delete nodes or relationships |
-| Labels as data | Defining a node label never creates nodes |
+| Graph-native / schema-only rollback | `dropIndex()` / `dropConstraint()` / `dropSchema()` remove DDL only — **do not** delete nodes or relationships |
+| SQL-style `drop()` | **Does** `DETACH DELETE` nodes for that label (unlike `dropSchema()`) |
+| Multi-database | `createDatabase` / `dropDatabaseIfExists` need Enterprise; Community gets a rewritten driver error |
+| Labels as data | Defining a node label never creates nodes by itself |
 | History label | Fixed internal label `:_LaravelMigration` (isolated per Neo4j connection/database) |
 | Supported Neo4j | Index/constraint Cypher targets Neo4j 5.x (CI uses 5.22) |
+
 
 ---
 
@@ -746,7 +816,8 @@ In SPA / API apps, ensure `storage/debugbar` is writable and inspect the API req
 | Cypher missing from Debugbar | Install barryvdh/fruitcake Debugbar; enable the queries collector; resolve client/session from the container (or use `DB::connection('neo4j')`); for AJAX, open the API request in Debugbar |
 | `NEO4J_QUERY_CHANNEL` seems ignored | Channel name must exist under `logging.channels`; otherwise the package falls back to the default logger |
 | Unsupported PHP / Laravel | PHP 8.2+ and Illuminate 12–13 are required by Composer |
-| `Schema::create() is not supported for Neo4j` | Use `Schema::connection('neo4j')->node()` / `relationship()` instead of SQL-style tables |
+| `Neo4j Schema::create() requires at least one primary, unique, index, or fulltext` | Add a primary/unique/index/fulltext so `hasTable()` can see the label; typed columns alone are not materialized. Or use graph-native `node()` / `relationship()` |
+| `Schema::createDatabase() requires Neo4j Enterprise Edition` | Multi-database needs Enterprise; Community has no fallback. Use a single database or upgrade |
 | Migration history / constraint errors | Ensure the Neo4j user can create constraints; run `migrate` with `--database=neo4j`; history lives under `:_LaravelMigration` |
 
 Open an issue: [github.com/neo4j-php/neo4j-laravel/issues](https://github.com/neo4j-php/neo4j-laravel/issues).
