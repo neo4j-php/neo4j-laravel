@@ -246,6 +246,19 @@ final class Neo4jSchemaGrammarTest extends TestCase
         );
     }
 
+    public function testCompilesRelationshipTypesAndConstraintsIntrospection(): void
+    {
+        $grammar = new Neo4jSchemaGrammar();
+
+        self::assertSame(
+            'CALL db.relationshipTypes() YIELD relationshipType RETURN relationshipType AS name ORDER BY name',
+            $grammar->compileRelationshipTypes()
+        );
+        self::assertStringContainsString('entityType = \'RELATIONSHIP\'', $grammar->compileRelationshipIndexTypes());
+        self::assertStringContainsString('SHOW CONSTRAINTS', $grammar->compileConstraints());
+        self::assertStringContainsString("'User' IN labelsOrTypes", $grammar->compileConstraints('User'));
+    }
+
     /**
      * Laravel 12: Blueprint($table, $callback). Laravel 13: Blueprint($connection, $table, $callback).
      */

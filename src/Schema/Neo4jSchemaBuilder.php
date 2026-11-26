@@ -7,9 +7,12 @@ use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Database\Schema\Builder;
 use InvalidArgumentException;
 use Laudis\Neo4j\Contracts\CypherSequence;
+use Laudis\Neo4j\Exception\Neo4jException;
 use Neo4j\Neo4jLaravel\Neo4jConnection;
+use Neo4j\Neo4jLaravel\Neo4jProcessor;
 use Neo4j\Neo4jLaravel\Neo4jSchemaGrammar;
 use RuntimeException;
+use Throwable;
 
 /**
  * Schema builder for Neo4j connections.
@@ -30,6 +33,8 @@ use RuntimeException;
  * nodes for that label (SQL DROP TABLE semantics). {@see dropAllTables()} wipes
  * **every** user constraint/index and **all** nodes in the connected database —
  * never call it on a shared Neo4j instance outside tests / migrate:fresh.
+ * Prefer {@see dropSchema()} / {@see dropSchemaIfExists()} to remove indexes and
+ * constraints for a label without deleting nodes.
  *
  * @property Neo4jConnection $connection
  * @property Neo4jSchemaGrammar $grammar
@@ -199,19 +204,89 @@ class Neo4jSchemaBuilder extends Builder
     }
 
     /**
+     * Relationship types present as edges, plus types referenced by relationship indexes.
+     *
+     * @return list<array{name: string}>
+     */
+    public function getRelationshipTypes(): array
+    {
+        $grammar = $this->grammar();
+        $names = [];
+
+        foreach ($this->connection->selectFromWriteConnection($grammar->compileRelationshipTypes()) as $row) {
+            $name = is_object($row) ? ($row->name ?? null) : ($row['name'] ?? null);
+
+            if (is_string($name) && $name !== '') {
+                $names[$name] = true;
+            }
+        }
+
+        foreach ($this->connection->selectFromWriteConnection($grammar->compileRelationshipIndexTypes()) as $row) {
+            $types = is_object($row) ? ($row->labelsOrTypes ?? null) : ($row['labelsOrTypes'] ?? null);
+
+            foreach ($this->normalizeLabelList($types) as $name) {
+                $names[$name] = true;
+            }
+        }
+
+        ksort($names);
+
+        return array_map(
+            static fn (string $name): array => ['name' => $name],
+            array_keys($names)
+        );
+    }
+
+    /**
+     * List Neo4j constraints, optionally scoped to a label or relationship type.
+     *
+     * @param  string|null  $owner  Node label or relationship type (prefix applied for labels)
+     * @return list<array{name: string, type: string, entity_type: string, columns: list<string>, labels_or_types: list<string>}>
+     */
+    public function getConstraints(?string $owner = null): array
+    {
+        $grammar = $this->grammar();
+        $scoped = $owner === null || $owner === ''
+            ? null
+            : $this->connection->getTablePrefix().$owner;
+
+        $processor = $this->connection->getPostProcessor();
+
+        if (! $processor instanceof Neo4jProcessor) {
+            throw new RuntimeException('Neo4jSchemaBuilder::getConstraints() requires Neo4jProcessor.');
+        }
+
+        return $processor->processConstraints(
+            $this->connection->selectFromWriteConnection($grammar->compileConstraints($scoped))
+        );
+    }
+
+    /**
+     * Neo4j has no foreign keys; return an empty list for Laravel compatibility.
+     *
+     * @param  string  $table
+     * @return list<array<string, mixed>>
+     */
+    #[\Override]
+    public function getForeignKeys($table)
+    {
+        return [];
+    }
+
+    /**
      * Drop a label: remove its constraints/indexes, then DETACH DELETE its nodes.
      *
      * Matches SQL DROP TABLE: schema objects **and** data for that label are
-     * removed. This is not a schema-only drop — Neo4j users who only want to
-     * remove indexes/constraints should drop those by name instead. A dedicated
-     * schema-only helper may be added in a later phase.
+     * removed. For schema-only cleanup use {@see dropSchema()} /
+     * {@see dropSchemaIfExists()}, or named {@see dropIndex()} /
+     * {@see dropConstraint()}.
      *
      * @param  string  $table
      */
     #[\Override]
     public function drop($table): void
     {
-        $this->dropLabel($table, ifExists: false);
+        $this->dropLabel($table, ifExists: false, deleteNodes: true);
     }
 
     /**
@@ -225,7 +300,27 @@ class Neo4jSchemaBuilder extends Builder
     #[\Override]
     public function dropIfExists($table): void
     {
-        $this->dropLabel($table, ifExists: true);
+        $this->dropLabel($table, ifExists: true, deleteNodes: true);
+    }
+
+    /**
+     * Drop constraints and indexes for a label without deleting nodes.
+     *
+     * Unlike {@see drop()}, this never runs `DETACH DELETE`.
+     */
+    public function dropSchema(string $table): void
+    {
+        $this->dropLabel($table, ifExists: false, deleteNodes: false);
+    }
+
+    /**
+     * Drop constraints and indexes for a label if it exists, without deleting nodes.
+     *
+     * No-op when {@see hasTable()} is false.
+     */
+    public function dropSchemaIfExists(string $table): void
+    {
+        $this->dropLabel($table, ifExists: true, deleteNodes: false);
     }
 
     /**
@@ -263,39 +358,51 @@ class Neo4jSchemaBuilder extends Builder
     /**
      * Create a Neo4j database (multi-database / `CREATE DATABASE`).
      *
-     * Neo4j **Enterprise Edition only**. On Community the server rejects the
-     * Cypher with an edition/capability error — there is no Community fallback.
+     * Neo4j **Enterprise Edition only**. On Community, throws a clear
+     * {@see RuntimeException} instead of a raw server administration error.
      *
      * @param  string  $name
+     *
+     * @throws RuntimeException when the server does not support multi-database
      */
     #[\Override]
     public function createDatabase($name): bool
     {
-        return $this->connection->statement(
-            $this->grammar()->compileCreateDatabase($name, $this->connection)
-        );
+        try {
+            return $this->connection->statement(
+                $this->grammar()->compileCreateDatabase($name, $this->connection)
+            );
+        } catch (Throwable $e) {
+            throw $this->rewriteMultiDatabaseException($e, 'createDatabase');
+        }
     }
 
     /**
      * Drop a Neo4j database if it exists (`DROP DATABASE`).
      *
-     * Neo4j **Enterprise Edition only**. On Community the server rejects the
-     * Cypher with an edition/capability error — there is no Community fallback.
+     * Neo4j **Enterprise Edition only**. On Community, throws a clear
+     * {@see RuntimeException} instead of a raw server administration error.
      *
      * @param  string  $name
+     *
+     * @throws RuntimeException when the server does not support multi-database
      */
     #[\Override]
     public function dropDatabaseIfExists($name): bool
     {
-        return $this->connection->statement(
-            $this->grammar()->compileDropDatabaseIfExists($name)
-        );
+        try {
+            return $this->connection->statement(
+                $this->grammar()->compileDropDatabaseIfExists($name)
+            );
+        } catch (Throwable $e) {
+            throw $this->rewriteMultiDatabaseException($e, 'dropDatabaseIfExists');
+        }
     }
 
     /**
      * @param  string  $table  Logical table name (prefix applied once inside)
      */
-    private function dropLabel(string $table, bool $ifExists): void
+    private function dropLabel(string $table, bool $ifExists, bool $deleteNodes): void
     {
         if ($ifExists && ! $this->hasTable($table)) {
             return;
@@ -318,7 +425,51 @@ class Neo4jSchemaBuilder extends Builder
             }
         }
 
-        $this->connection->statement($grammar->compileDeleteNodes($label));
+        if ($deleteNodes) {
+            $this->connection->statement($grammar->compileDeleteNodes($label));
+        }
+    }
+
+    /**
+     * @throws RuntimeException|Throwable
+     */
+    private function rewriteMultiDatabaseException(Throwable $e, string $method): never
+    {
+        if ($this->isMultiDatabaseUnsupported($e)) {
+            throw new RuntimeException(
+                "Schema::{$method}() requires Neo4j Enterprise Edition (multi-database). "
+                .'Community Edition does not support CREATE DATABASE / DROP DATABASE. '
+                .'There is no Community fallback in this driver.',
+                previous: $e
+            );
+        }
+
+        throw $e;
+    }
+
+    private function isMultiDatabaseUnsupported(Throwable $e): bool
+    {
+        for ($current = $e; $current !== null; $current = $current->getPrevious()) {
+            $haystack = strtolower($current->getMessage());
+
+            if ($current instanceof Neo4jException) {
+                $haystack .= ' '.strtolower($current->getTitle().' '.$current->getNeo4jMessage());
+            }
+
+            if (
+                str_contains($haystack, 'unsupportedadministration')
+                || str_contains($haystack, 'unsupported administration')
+                || str_contains($haystack, 'enterprise edition')
+                || (str_contains($haystack, 'create database') && str_contains($haystack, 'not supported'))
+                || (str_contains($haystack, 'drop database') && str_contains($haystack, 'not supported'))
+                || str_contains($haystack, 'multi-database')
+                || str_contains($haystack, 'multidatabase')
+            ) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private function assertBlueprintDefinesSchema(Blueprint $blueprint): void

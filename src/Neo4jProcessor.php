@@ -107,6 +107,43 @@ final class Neo4jProcessor extends Processor
     }
 
     /**
+     * @param  array  $results
+     * @return list<array{name: string, type: string, entity_type: string, columns: list<string>, labels_or_types: list<string>}>
+     */
+    public function processConstraints($results): array
+    {
+        return array_map(function ($result) {
+            $result = (object) $result;
+            $properties = $result->properties ?? [];
+            $owners = $result->labelsOrTypes ?? [];
+
+            if ($properties instanceof CypherSequence) {
+                $properties = $properties->toArray();
+            }
+
+            if ($owners instanceof CypherSequence) {
+                $owners = $owners->toArray();
+            }
+
+            if (! is_array($properties)) {
+                $properties = $properties === null ? [] : [$properties];
+            }
+
+            if (! is_array($owners)) {
+                $owners = $owners === null ? [] : [$owners];
+            }
+
+            return [
+                'name' => (string) $result->name,
+                'type' => strtolower((string) ($result->type ?? '')),
+                'entity_type' => strtolower((string) ($result->entityType ?? '')),
+                'columns' => array_values(array_map('strval', $properties)),
+                'labels_or_types' => array_values(array_map('strval', $owners)),
+            ];
+        }, $results);
+    }
+
+    /**
      * @param  iterable<int, mixed>  $results
      */
     #[\Override]

@@ -148,6 +148,82 @@ final class Neo4jSchemaMigrationTest extends TestCase
         self::assertSame([], $connection->table('Movie')->get()->all());
     }
 
+    public function testGetRelationshipTypesAndConstraints(): void
+    {
+        $connection = Schema::connection('neo4j')->getConnection();
+        $schema = Schema::connection('neo4j');
+
+        $schema->node('Person', function ($node): void {
+            $node->unique('email');
+        });
+        $schema->relationship('ACTED_IN', function ($relationship): void {
+            $relationship->index('role');
+        });
+
+        $connection->statement(
+            'CREATE (a:Person {email: $email})-[:ACTED_IN {role: $role}]->(m:Movie {title: $title})',
+            [
+                'email' => 'ada@example.com',
+                'role' => 'lead',
+                'title' => 'The Matrix',
+            ]
+        );
+
+        $types = array_column($schema->getRelationshipTypes(), 'name');
+        self::assertContains('ACTED_IN', $types);
+
+        $constraints = $schema->getConstraints('Person');
+        $names = array_column($constraints, 'name');
+        self::assertContains('person_email_unique', $names);
+        self::assertSame([], $schema->getForeignKeys('Person'));
+
+        $connection->statement('MATCH (n) DETACH DELETE n');
+    }
+
+    public function testDropSchemaRemovesIndexesWithoutDeletingNodes(): void
+    {
+        $connection = Schema::connection('neo4j')->getConnection();
+        $schema = Schema::connection('neo4j');
+
+        $schema->create('User', function (Blueprint $table): void {
+            $table->string('email')->unique();
+            $table->string('name')->index();
+        });
+
+        $connection->statement('CREATE (n:User {email: $email, name: $name})', [
+            'email' => 'ada@example.com',
+            'name' => 'Ada',
+        ]);
+
+        $schema->dropSchema('User');
+
+        $count = $connection->select('MATCH (n:User {email: $email}) RETURN count(n) AS c', [
+            'email' => 'ada@example.com',
+        ])[0]->c;
+        self::assertSame(1, $count);
+
+        $indexNames = array_map(
+            static fn (object $row): string => (string) $row->name,
+            $connection->select('SHOW INDEXES YIELD name RETURN name AS name')
+        );
+        self::assertNotContains('user_email_unique', $indexNames);
+        self::assertNotContains('user_name_index', $indexNames);
+
+        $connection->statement('MATCH (n:User {email: $email}) DETACH DELETE n', [
+            'email' => 'ada@example.com',
+        ]);
+    }
+
+    public function testCreateDatabaseReportsEnterpriseRequirementOnCommunity(): void
+    {
+        try {
+            Schema::connection('neo4j')->createDatabase('neo4j_laravel_phase4_unused');
+            self::markTestSkipped('CREATE DATABASE succeeded (Neo4j Enterprise).');
+        } catch (\RuntimeException $e) {
+            self::assertStringContainsString('requires Neo4j Enterprise Edition', $e->getMessage());
+        }
+    }
+
     public function testMigrationRepositoryInstallAndLog(): void
     {
         $repository = new DatabaseMigrationRepository(

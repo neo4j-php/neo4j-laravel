@@ -144,4 +144,27 @@ final class Neo4jProcessorTest extends TestCase
         self::assertFalse($indexes[2]['primary']);
         self::assertFalse($indexes[2]['unique']);
     }
+
+    public function testProcessConstraintsNormalizesOwnersAndProperties(): void
+    {
+        $constraints = (new Neo4jProcessor())->processConstraints([
+            (object) [
+                'name' => 'user_email_unique',
+                'type' => 'UNIQUENESS',
+                'entityType' => 'NODE',
+                'labelsOrTypes' => new CypherList(['User']),
+                'properties' => new CypherList(['email']),
+            ],
+        ]);
+
+        self::assertSame([
+            [
+                'name' => 'user_email_unique',
+                'type' => 'uniqueness',
+                'entity_type' => 'node',
+                'columns' => ['email'],
+                'labels_or_types' => ['User'],
+            ],
+        ], $constraints);
+    }
 }

@@ -21,6 +21,8 @@ use Neo4j\Neo4jLaravel\Schema\Neo4jSchemaBuilder;
 use Neo4j\Neo4jLaravel\Tests\TestCase;
 use PHPUnit\Framework\MockObject\MockObject;
 use Psr\Http\Message\UriInterface;
+use RuntimeException;
+use Throwable;
 
 final class Neo4jSchemaBuilderTest extends TestCase
 {
@@ -135,10 +137,138 @@ final class Neo4jSchemaBuilderTest extends TestCase
         self::assertSame([], $this->statements);
     }
 
+    public function testGetRelationshipTypesMergesDataAndIndexTypes(): void
+    {
+        $builder = $this->connection(
+            readHandler: function (string $cypher): SummarizedResult {
+                if (str_contains($cypher, 'db.relationshipTypes')) {
+                    return $this->summarizedResult([
+                        new CypherMap(['name' => 'ACTED_IN']),
+                    ]);
+                }
+
+                if (str_contains($cypher, 'entityType = \'RELATIONSHIP\'')) {
+                    return $this->summarizedResult([
+                        new CypherMap(['labelsOrTypes' => new CypherList(['DIRECTED'])]),
+                    ]);
+                }
+
+                return $this->summarizedResult([]);
+            }
+        )->getSchemaBuilder();
+
+        self::assertSame([
+            ['name' => 'ACTED_IN'],
+            ['name' => 'DIRECTED'],
+        ], $builder->getRelationshipTypes());
+    }
+
+    public function testGetConstraintsDelegatesToProcessor(): void
+    {
+        $builder = $this->connection(
+            readHandler: function (string $cypher): SummarizedResult {
+                self::assertStringContainsString('SHOW CONSTRAINTS', $cypher);
+                self::assertStringContainsString("'User' IN labelsOrTypes", $cypher);
+
+                return $this->summarizedResult([
+                    new CypherMap([
+                        'name' => 'user_email_unique',
+                        'type' => 'UNIQUENESS',
+                        'entityType' => 'NODE',
+                        'labelsOrTypes' => new CypherList(['User']),
+                        'properties' => new CypherList(['email']),
+                    ]),
+                ]);
+            }
+        )->getSchemaBuilder();
+
+        self::assertSame([
+            [
+                'name' => 'user_email_unique',
+                'type' => 'uniqueness',
+                'entity_type' => 'node',
+                'columns' => ['email'],
+                'labels_or_types' => ['User'],
+            ],
+        ], $builder->getConstraints('User'));
+    }
+
+    public function testDropSchemaRemovesConstraintsAndIndexesButNotNodes(): void
+    {
+        $builder = $this->connection(
+            readHandler: function (string $cypher): SummarizedResult {
+                if (str_contains($cypher, 'SHOW CONSTRAINTS') && str_contains($cypher, 'RETURN name')) {
+                    return $this->summarizedResult([
+                        new CypherMap(['name' => 'user_email_unique']),
+                    ]);
+                }
+
+                if (str_contains($cypher, 'SHOW INDEXES') && str_contains($cypher, 'RETURN name')) {
+                    return $this->summarizedResult([
+                        new CypherMap(['name' => 'user_name_index']),
+                    ]);
+                }
+
+                return $this->summarizedResult([]);
+            }
+        )->getSchemaBuilder();
+
+        $builder->dropSchema('User');
+
+        self::assertContains('DROP CONSTRAINT user_email_unique IF EXISTS', $this->statements);
+        self::assertContains('DROP INDEX user_name_index IF EXISTS', $this->statements);
+        self::assertFalse(
+            (bool) array_filter(
+                $this->statements,
+                static fn (string $cypher): bool => str_contains($cypher, 'DETACH DELETE')
+            )
+        );
+    }
+
+    public function testCreateDatabaseRewritesCommunityEditionErrors(): void
+    {
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('requires Neo4j Enterprise Edition');
+
+        $builder = $this->connection(
+            writeException: new RuntimeException('UnsupportedAdministrationCommand: CREATE DATABASE is not supported')
+        )->getSchemaBuilder();
+
+        $builder->createDatabase('analytics');
+    }
+
+    public function testDropDatabaseIfExistsRewritesCommunityEditionErrors(): void
+    {
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('requires Neo4j Enterprise Edition');
+
+        $builder = $this->connection(
+            writeException: new RuntimeException('DROP DATABASE is not supported on this edition')
+        )->getSchemaBuilder();
+
+        $builder->dropDatabaseIfExists('analytics');
+    }
+
+    public function testDropSchemaIfExistsIsNoOpWhenLabelIsMissing(): void
+    {
+        $builder = $this->connection(
+            readHandler: fn (): SummarizedResult => $this->summarizedResult([])
+        )->getSchemaBuilder();
+
+        $builder->dropSchemaIfExists('DoesNotExist');
+
+        self::assertSame([], $this->statements);
+    }
+
+    public function testGetForeignKeysReturnsEmptyList(): void
+    {
+        self::assertSame([], $this->connection()->getSchemaBuilder()->getForeignKeys('User'));
+    }
+
     /**
      * @param  (callable(string): SummarizedResult)|null  $readHandler
      */
-    private function connection(?callable $readHandler = null): Neo4jConnection
+    private function connection(?callable $readHandler = null, ?Throwable $writeException = null): Neo4jConnection
     {
         $this->statements = [];
         $this->reads = [];
@@ -160,7 +290,11 @@ final class Neo4jSchemaBuilderTest extends TestCase
         /** @var ClientInterface&MockObject $client */
         $client = $this->createMock(ClientInterface::class);
         $client->method('writeTransaction')->willReturnCallback(
-            function (callable $handler) use ($tx, $readHandler): mixed {
+            function (callable $handler) use ($tx, $readHandler, $writeException): mixed {
+                if ($writeException !== null) {
+                    throw $writeException;
+                }
+
                 if ($readHandler !== null) {
                     // drop()/create() write path while hasTable may already have read
                     $writeTx = $this->createMock(TransactionInterface::class);

@@ -407,6 +407,29 @@ final class Neo4jSchemaGrammar extends Grammar
         return 'CALL db.labels() YIELD label RETURN label AS name ORDER BY name';
     }
 
+    /**
+     * Relationship types present as data edges.
+     */
+    public function compileRelationshipTypes(): string
+    {
+        return 'CALL db.relationshipTypes() YIELD relationshipType RETURN relationshipType AS name ORDER BY name';
+    }
+
+    /**
+     * Relationship types referenced by non-LOOKUP indexes (schema without data).
+     */
+    public function compileRelationshipIndexTypes(): string
+    {
+        return <<<'CYPHER'
+SHOW INDEXES
+YIELD labelsOrTypes, type, entityType
+WHERE type <> 'LOOKUP'
+  AND entityType = 'RELATIONSHIP'
+  AND labelsOrTypes IS NOT NULL
+RETURN labelsOrTypes
+CYPHER;
+    }
+
     public function compileConstraintLabels(): string
     {
         // SHOW … cannot UNWIND directly; Neo4jSchemaBuilder flattens labelsOrTypes.
@@ -426,6 +449,37 @@ YIELD labelsOrTypes, type
 WHERE type <> 'LOOKUP' AND labelsOrTypes IS NOT NULL
 RETURN labelsOrTypes
 CYPHER;
+    }
+
+    /**
+     * List constraints, optionally scoped to a node label / relationship type.
+     */
+    public function compileConstraints(?string $owner = null): string
+    {
+        if ($owner === null || $owner === '') {
+            return <<<'CYPHER'
+SHOW CONSTRAINTS
+YIELD name, type, entityType, labelsOrTypes, properties
+WHERE name IS NOT NULL
+RETURN name, type, entityType, labelsOrTypes, properties
+ORDER BY name
+CYPHER;
+        }
+
+        $this->assertIdentifier($owner);
+
+        return sprintf(
+            <<<'CYPHER'
+SHOW CONSTRAINTS
+YIELD name, type, entityType, labelsOrTypes, properties
+WHERE name IS NOT NULL
+  AND labelsOrTypes IS NOT NULL
+  AND '%s' IN labelsOrTypes
+RETURN name, type, entityType, labelsOrTypes, properties
+ORDER BY name
+CYPHER,
+            $owner
+        );
     }
 
     /**
