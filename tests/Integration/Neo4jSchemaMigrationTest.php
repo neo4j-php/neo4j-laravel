@@ -224,6 +224,18 @@ final class Neo4jSchemaMigrationTest extends TestCase
         }
     }
 
+    public function testDestructiveDropAllTablesCanBeBlockedByConfig(): void
+    {
+        $this->app['config']->set('neo4j-laravel.allow_destructive_schema', false);
+
+        try {
+            $this->expectException(\Neo4j\Neo4jLaravel\Exceptions\DestructiveSchemaOperationException::class);
+            Schema::connection('neo4j')->dropAllTables();
+        } finally {
+            $this->app['config']->set('neo4j-laravel.allow_destructive_schema', true);
+        }
+    }
+
     public function testMigrationRepositoryInstallAndLog(): void
     {
         $repository = new DatabaseMigrationRepository(

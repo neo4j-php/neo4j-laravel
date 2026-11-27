@@ -16,6 +16,7 @@ use Laudis\Neo4j\Enum\ConnectionProtocol;
 use Laudis\Neo4j\Enum\QueryTypeEnum;
 use Laudis\Neo4j\Types\CypherList;
 use Laudis\Neo4j\Types\CypherMap;
+use Neo4j\Neo4jLaravel\Exceptions\DestructiveSchemaOperationException;
 use Neo4j\Neo4jLaravel\Neo4jConnection;
 use Neo4j\Neo4jLaravel\Schema\Neo4jSchemaBuilder;
 use Neo4j\Neo4jLaravel\Tests\TestCase;
@@ -265,11 +266,95 @@ final class Neo4jSchemaBuilderTest extends TestCase
         self::assertSame([], $this->connection()->getSchemaBuilder()->getForeignKeys('User'));
     }
 
+    public function testDropAllTablesIsBlockedWhenDestructiveSchemaDisabled(): void
+    {
+        $this->app['config']->set('neo4j-laravel.allow_destructive_schema', false);
+
+        $this->expectException(DestructiveSchemaOperationException::class);
+        $this->expectExceptionMessage('destructive schema operations are disabled');
+
+        $this->connection()->getSchemaBuilder()->dropAllTables();
+    }
+
+    public function testDropIsBlockedWhenDestructiveSchemaDisabled(): void
+    {
+        $this->app['config']->set('neo4j-laravel.allow_destructive_schema', false);
+
+        $this->expectException(DestructiveSchemaOperationException::class);
+
+        $this->connection()->getSchemaBuilder()->drop('User');
+    }
+
+    public function testDropSchemaRemainsAllowedWhenDestructiveSchemaDisabled(): void
+    {
+        $this->app['config']->set('neo4j-laravel.allow_destructive_schema', false);
+
+        $builder = $this->connection(
+            readHandler: function (string $cypher): SummarizedResult {
+                if (str_contains($cypher, 'SHOW CONSTRAINTS') && str_contains($cypher, 'RETURN name')) {
+                    return $this->summarizedResult([
+                        new CypherMap(['name' => 'user_email_unique']),
+                    ]);
+                }
+
+                return $this->summarizedResult([]);
+            }
+        )->getSchemaBuilder();
+
+        $builder->dropSchema('User');
+
+        self::assertContains('DROP CONSTRAINT user_email_unique IF EXISTS', $this->statements);
+        self::assertSame([], array_filter(
+            $this->statements,
+            static fn (string $cypher): bool => str_contains($cypher, 'DETACH DELETE')
+        ));
+    }
+
+    public function testDropIfExistsNoOpWhenMissingDoesNotRequireDestructiveFlag(): void
+    {
+        $this->app['config']->set('neo4j-laravel.allow_destructive_schema', false);
+
+        $builder = $this->connection(
+            readHandler: fn (): SummarizedResult => $this->summarizedResult([])
+        )->getSchemaBuilder();
+
+        $builder->dropIfExists('DoesNotExist');
+
+        self::assertSame([], $this->statements);
+    }
+
+    public function testConnectionAllowDestructiveSchemaOverridesPackageConfig(): void
+    {
+        $this->app['config']->set('neo4j-laravel.allow_destructive_schema', false);
+
+        $builder = $this->connection(
+            config: ['allow_destructive_schema' => true],
+            readHandler: fn (): SummarizedResult => $this->summarizedResult([])
+        )->getSchemaBuilder();
+
+        $builder->dropAllTables();
+
+        self::assertContains('MATCH (n) DETACH DELETE n', $this->statements);
+    }
+
+    public function testDropDatabaseIfExistsIsBlockedWhenDestructiveSchemaDisabled(): void
+    {
+        $this->app['config']->set('neo4j-laravel.allow_destructive_schema', false);
+
+        $this->expectException(DestructiveSchemaOperationException::class);
+
+        $this->connection()->getSchemaBuilder()->dropDatabaseIfExists('analytics');
+    }
+
     /**
      * @param  (callable(string): SummarizedResult)|null  $readHandler
+     * @param  array<string, mixed>  $config
      */
-    private function connection(?callable $readHandler = null, ?Throwable $writeException = null): Neo4jConnection
-    {
+    private function connection(
+        ?callable $readHandler = null,
+        ?Throwable $writeException = null,
+        array $config = [],
+    ): Neo4jConnection {
         $this->statements = [];
         $this->reads = [];
 
@@ -314,10 +399,10 @@ final class Neo4jSchemaBuilderTest extends TestCase
             static fn (callable $handler): mixed => $handler($tx)
         );
 
-        $connection = new Neo4jConnection($client, 'neo4j', '', [
+        $connection = new Neo4jConnection($client, 'neo4j', '', array_merge([
             'name' => 'neo4j',
             'driver' => 'neo4j',
-        ]);
+        ], $config));
         $connection->setEventDispatcher($this->app['events']);
 
         return $connection;

@@ -8,6 +8,7 @@ use Illuminate\Database\Schema\Builder;
 use InvalidArgumentException;
 use Laudis\Neo4j\Contracts\CypherSequence;
 use Laudis\Neo4j\Exception\Neo4jException;
+use Neo4j\Neo4jLaravel\Exceptions\DestructiveSchemaOperationException;
 use Neo4j\Neo4jLaravel\Neo4jConnection;
 use Neo4j\Neo4jLaravel\Neo4jProcessor;
 use Neo4j\Neo4jLaravel\Neo4jSchemaGrammar;
@@ -35,6 +36,10 @@ use Throwable;
  * never call it on a shared Neo4j instance outside tests / migrate:fresh.
  * Prefer {@see dropSchema()} / {@see dropSchemaIfExists()} to remove indexes and
  * constraints for a label without deleting nodes.
+ *
+ * Data-deleting operations are gated by `neo4j-laravel.allow_destructive_schema`
+ * (or per-connection `allow_destructive_schema`). When unset, they are blocked in
+ * the `production` environment.
  *
  * @property Neo4jConnection $connection
  * @property Neo4jSchemaGrammar $grammar
@@ -286,6 +291,7 @@ class Neo4jSchemaBuilder extends Builder
     #[\Override]
     public function drop($table): void
     {
+        $this->assertDestructiveSchemaAllowed('drop');
         $this->dropLabel($table, ifExists: false, deleteNodes: true);
     }
 
@@ -300,7 +306,13 @@ class Neo4jSchemaBuilder extends Builder
     #[\Override]
     public function dropIfExists($table): void
     {
-        $this->dropLabel($table, ifExists: true, deleteNodes: true);
+        // No-op when missing — do not require the destructive flag for a no-op.
+        if (! $this->hasTable($table)) {
+            return;
+        }
+
+        $this->assertDestructiveSchemaAllowed('dropIfExists');
+        $this->dropLabel($table, ifExists: false, deleteNodes: true);
     }
 
     /**
@@ -336,6 +348,8 @@ class Neo4jSchemaBuilder extends Builder
     #[\Override]
     public function dropAllTables(): void
     {
+        $this->assertDestructiveSchemaAllowed('dropAllTables');
+
         $grammar = $this->grammar();
 
         foreach ($this->connection->selectFromWriteConnection($grammar->compileListConstraintNames()) as $row) {
@@ -390,6 +404,8 @@ class Neo4jSchemaBuilder extends Builder
     #[\Override]
     public function dropDatabaseIfExists($name): bool
     {
+        $this->assertDestructiveSchemaAllowed('dropDatabaseIfExists');
+
         try {
             return $this->connection->statement(
                 $this->grammar()->compileDropDatabaseIfExists($name)
@@ -427,6 +443,44 @@ class Neo4jSchemaBuilder extends Builder
 
         if ($deleteNodes) {
             $this->connection->statement($grammar->compileDeleteNodes($label));
+        }
+    }
+
+    /**
+     * @throws DestructiveSchemaOperationException
+     */
+    private function assertDestructiveSchemaAllowed(string $operation): void
+    {
+        if ($this->destructiveSchemaAllowed()) {
+            return;
+        }
+
+        throw new DestructiveSchemaOperationException(
+            "Schema::{$operation}() is blocked: Neo4j destructive schema operations are disabled. "
+            .'Set NEO4J_ALLOW_DESTRUCTIVE_SCHEMA=true (or connection allow_destructive_schema=true) '
+            .'to permit drop()/dropAllTables()/migrate:fresh/dropDatabaseIfExists — these delete graph data. '
+            .'Prefer dropSchema()/dropIndex()/dropConstraint() for schema-only cleanup.'
+        );
+    }
+
+    private function destructiveSchemaAllowed(): bool
+    {
+        $connectionValue = $this->connection->getConfig('allow_destructive_schema');
+
+        if ($connectionValue !== null) {
+            return filter_var($connectionValue, FILTER_VALIDATE_BOOLEAN);
+        }
+
+        $packageValue = config('neo4j-laravel.allow_destructive_schema');
+
+        if ($packageValue !== null && $packageValue !== '') {
+            return filter_var($packageValue, FILTER_VALIDATE_BOOLEAN);
+        }
+
+        try {
+            return ! app()->environment('production');
+        } catch (Throwable) {
+            return true;
         }
     }
 

@@ -41,5 +41,8 @@ abstract class TestCase extends BaseTestCase
         $app['config']->set('debugbar.enabled', true);
         // fruitcake/laravel-debugbar v4 disables itself in the "testing" env unless forced.
         $app['config']->set('debugbar.force_allow_enable', true);
+
+        // Integration setUp/tearDown and migrate:fresh-style wipes need destructive drops.
+        $app['config']->set('neo4j-laravel.allow_destructive_schema', true);
     }
 }

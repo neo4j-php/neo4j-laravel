@@ -694,9 +694,41 @@ Schema::connection('neo4j')->drop('User');
 > [!WARNING]
 > Prefer `dropSchema()` / `dropIndex()` / `dropConstraint()` when you only want DDL cleanup. Use label-scoped `drop()` / `dropIfExists()` when you intentionally want SQL DROP TABLE behavior. Use `dropAllTables()` only for tests or an intentional migrate:fresh-style wipe. Never call it on a shared or production Neo4j instance.
 
+### Production safety (destructive ops)
+
+Data-deleting Schema APIs are gated so a careless `migrate:fresh` cannot wipe a production graph by default:
+
+| Operation | Deletes graph data? | Gated? |
+| --- | --- | --- |
+| `dropSchema()` / `dropIndex()` / `dropConstraint()` | No | Never blocked |
+| `drop()` / `dropIfExists()` (when label exists) | Yes — `DETACH DELETE` that label | Yes |
+| `dropAllTables()` / `migrate:fresh` | Yes — **entire** connected DB | Yes |
+| `dropDatabaseIfExists()` | Yes — drops the Neo4j database | Yes |
+
+| `NEO4J_ALLOW_DESTRUCTIVE_SCHEMA` | Behavior |
+| --- | --- |
+| unset | Allow unless `APP_ENV=production` |
+| `true` | Allow (local, CI, intentional fresh) |
+| `false` | Always block — throws `DestructiveSchemaOperationException` |
+
+Per-connection override (wins over the package env):
+
+```php
+'neo4j' => [
+    'driver' => 'neo4j',
+    // ...
+    'allow_destructive_schema' => true, // or false
+],
+```
+
+```env
+# Explicit allow for staging migrate:fresh (still irreversible — use with care)
+NEO4J_ALLOW_DESTRUCTIVE_SCHEMA=true
+```
+
 ### Create / drop database
 
-`Schema::connection('neo4j')->createDatabase('analytics')` and `dropDatabaseIfExists('analytics')` compile to Neo4j multi-database Cypher. That feature is **Enterprise Edition only**. On Community, the driver throws a clear `RuntimeException` explaining the Enterprise requirement (instead of a raw `UnsupportedAdministrationCommand`). There is no Community fallback.
+`Schema::connection('neo4j')->createDatabase('analytics')` and `dropDatabaseIfExists('analytics')` compile to Neo4j multi-database Cypher. That feature is **Enterprise Edition only**. On Community, the driver throws a clear `RuntimeException` explaining the Enterprise requirement (instead of a raw `UnsupportedAdministrationCommand`). There is no Community fallback. `dropDatabaseIfExists()` is also gated by the destructive-schema flag above.
 
 ### Run, status, and rollback
 
@@ -711,6 +743,23 @@ php artisan migrate:reset --database=neo4j
 
 `migrate:install` creates the uniqueness constraint that backs the history repository when needed; `migrate` also installs it automatically if missing.
 
+#### Rollback contracts
+
+| Migration style | Typical `down()` | Effect on data |
+| --- | --- | --- |
+| Graph-native | `dropIndex()` / `dropConstraint()` | Schema only — nodes/relationships remain |
+| SQL-style | `drop('User')` / `dropIfExists('User')` | Schema **and** all `:User` nodes deleted |
+| Schema-only SQL cleanup | `dropSchema('User')` | Indexes/constraints for the label only |
+
+Write `down()` to match how `up()` was defined. Prefer graph-native or `dropSchema()` in production rollbacks unless you intentionally want SQL DROP TABLE semantics.
+
+#### Production patterns
+
+- Keep `NEO4J_ALLOW_DESTRUCTIVE_SCHEMA` unset or `false` in production; use `dropSchema` / named drops in rollbacks.
+- Do **not** run concurrent `php artisan migrate` against the same Neo4j database — history uses a uniqueness constraint on `:_LaravelMigration(migration)`, but batch allocation is not distributed-locked.
+- History is scoped per Neo4j **database** on the connection (`database` key / `NEO4J_DATABASE`), not per Laravel app name.
+- Treat `migrate:fresh` / `migrate:refresh` as wipe operations; they call `dropAllTables()` and require the destructive flag when production defaults would block them.
+
 ### Known limitations
 
 | Topic | Detail |
@@ -718,7 +767,9 @@ php artisan migrate:reset --database=neo4j
 | Typed blueprint columns | Not materialized as node properties — only constraints/indexes are created |
 | Schema transactions | Neo4j DDL is not wrapped in Bolt transactions by the Migrator (`supportsSchemaTransactions` is false) |
 | Graph-native / schema-only rollback | `dropIndex()` / `dropConstraint()` / `dropSchema()` remove DDL only — **do not** delete nodes or relationships |
-| SQL-style `drop()` | **Does** `DETACH DELETE` nodes for that label (unlike `dropSchema()`) |
+| SQL-style `drop()` | **Does** `DETACH DELETE` nodes for that label (unlike `dropSchema()`); gated in production by default |
+| Destructive ops | Blocked in production unless `NEO4J_ALLOW_DESTRUCTIVE_SCHEMA=true` (or connection override) |
+| Concurrent migrate | Not supported against the same Neo4j database; run a single migrator at a time |
 | Multi-database | `createDatabase` / `dropDatabaseIfExists` need Enterprise; Community gets a rewritten driver error |
 | Labels as data | Defining a node label never creates nodes by itself |
 | History label | Fixed internal label `:_LaravelMigration` (isolated per Neo4j connection/database) |
@@ -755,6 +806,7 @@ Merged from the package; override with env:
 | Key | Env | Default | Purpose |
 | --- | --- | --- | --- |
 | `query_log_channel` | `NEO4J_QUERY_CHANNEL` | `''` | Named Laravel log channel for the end-of-request Cypher flush |
+| `allow_destructive_schema` | `NEO4J_ALLOW_DESTRUCTIVE_SCHEMA` | unset → allow unless `production` | Permit `drop()` / `dropAllTables()` / `migrate:fresh` / `dropDatabaseIfExists` |
 
 ---
 
@@ -818,6 +870,7 @@ In SPA / API apps, ensure `storage/debugbar` is writable and inspect the API req
 | Unsupported PHP / Laravel | PHP 8.2+ and Illuminate 12–13 are required by Composer |
 | `Neo4j Schema::create() requires at least one primary, unique, index, or fulltext` | Add a primary/unique/index/fulltext so `hasTable()` can see the label; typed columns alone are not materialized. Or use graph-native `node()` / `relationship()` |
 | `Schema::createDatabase() requires Neo4j Enterprise Edition` | Multi-database needs Enterprise; Community has no fallback. Use a single database or upgrade |
+| `destructive schema operations are disabled` | `drop()` / `dropAllTables()` / `migrate:fresh` blocked; set `NEO4J_ALLOW_DESTRUCTIVE_SCHEMA=true` only when intentional, or use `dropSchema()` |
 | Migration history / constraint errors | Ensure the Neo4j user can create constraints; run `migrate` with `--database=neo4j`; history lives under `:_LaravelMigration` |
 
 Open an issue: [github.com/neo4j-php/neo4j-laravel/issues](https://github.com/neo4j-php/neo4j-laravel/issues).
