@@ -14,6 +14,11 @@ use RuntimeException;
  * :_LaravelMigration(migration). History rows are normal nodes managed via
  * {@see Neo4jConnection::table()}.
  *
+ * The uniqueness constraint prevents duplicate history rows for the same migration
+ * name, but concurrent `migrate` processes can still race on batch numbers — run a
+ * single migrator against a given Neo4j database at a time. History is scoped to
+ * the connection's Neo4j database (not shared across CREATE DATABASE targets).
+ *
  * @api
  */
 final class Neo4jMigrationRepository implements MigrationRepositoryInterface
